@@ -106,7 +106,6 @@ pub fn Registry(comptime component_types: []const type) type {
         pub const CommandBuffer = @import("command_buffer.zig").CommandBuffer(@This());
         pub const Schedule = @import("schedule.zig").Schedule(@This());
         pub const Parallel = @import("parallel.zig").Parallel(@This());
-        pub const Serialize = @import("serialize.zig").Serializer(@This());
     };
 }
 
@@ -121,7 +120,6 @@ test {
     _ = @import("schedule.zig");
     _ = @import("parallel.zig");
     _ = @import("sparse_set.zig");
-    _ = @import("serialize.zig");
     std.testing.refAllDecls(@This());
 }
 

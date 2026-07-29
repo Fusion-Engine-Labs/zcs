@@ -20,7 +20,6 @@ Designed for the [Zephyr Game Engine](https://github.com/Zephyr-Engine) but full
 - **Schedule** — phased system execution (pre_update, update, post_update, render) with automatic CommandBuffer flushing, delta-time, and frame counting (`tickDt`).
 - **Resources** — world-owned, type-erased singleton storage for global game state (delta time, frame count, etc.), readable from any system.
 - **Lifecycle observers** — opt-in `on_spawn`/`on_despawn`/`on_add`/`on_remove` callbacks with near-zero cost when unused.
-- **Serialization** — binary round-trip of full world state (entities, generations, component columns). Same-build snapshot format (`ZCS2`), not a portable scene format.
 - **Diagnostics** — `world.stats()` reports entity/archetype/chunk counts, occupancy, and memory use.
 - **SparseSet** — generation-aware associative container for per-entity side data (debug names, editor metadata).
 - **Pre-warming & reset** — `world.preWarm(...)` to pre-allocate, `world.clear()` for fast scene reloads.
@@ -208,21 +207,21 @@ if (names.get(entity)) |n| {
 
 ## Query spec
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `read` | `[]const type` | Components accessed as `[]const T` |
-| `write` | `[]const type` | Components accessed as `[]T` (also readable) |
-| `with` | `[]const type` | Required components (not accessed) |
-| `without` | `[]const type` | Excluded components |
+| Field     | Type           | Description                                  |
+| --------- | -------------- | -------------------------------------------- |
+| `read`    | `[]const type` | Components accessed as `[]const T`           |
+| `write`   | `[]const type` | Components accessed as `[]T` (also readable) |
+| `with`    | `[]const type` | Required components (not accessed)           |
+| `without` | `[]const type` | Excluded components                          |
 
 ## Schedule phases
 
-| Phase | Intended use |
-|-------|-------------|
-| `pre_update` | Physics forces, input processing |
-| `update` | Core game logic, movement, AI |
-| `post_update` | Collision resolution, cleanup |
-| `render` | Drawing, UI updates |
+| Phase         | Intended use                     |
+| ------------- | -------------------------------- |
+| `pre_update`  | Physics forces, input processing |
+| `update`      | Core game logic, movement, AI    |
+| `post_update` | Collision resolution, cleanup    |
+| `render`      | Drawing, UI updates              |
 
 ## Benchmarks
 
@@ -240,11 +239,11 @@ All parameters are optional:
 zig build bench -- [options]
 ```
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--entities=N` | 10000 | Number of entities for iteration benchmarks |
-| `--iters=N` | 100 | Measured samples per benchmark |
-| `--warmup=N` | 10 | Warmup iterations before measuring |
+| Flag           | Default | Description                                 |
+| -------------- | ------- | ------------------------------------------- |
+| `--entities=N` | 10000   | Number of entities for iteration benchmarks |
+| `--iters=N`    | 100     | Measured samples per benchmark              |
+| `--warmup=N`   | 10      | Warmup iterations before measuring          |
 
 ### What it measures
 
