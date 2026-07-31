@@ -1,15 +1,12 @@
 const std = @import("std");
+
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
-/// Standard resource: the current frame's delta time, in seconds.
 pub const DeltaTime = struct { seconds: f32 = 0 };
 
-/// Standard resource: a monotonically increasing frame counter.
 pub const FrameCount = struct { value: u64 = 0 };
 
-/// Type-erased singleton resource storage.
-/// Stores one value per type, accessible by comptime type key.
 pub const Resources = struct {
     const ErasedResource = struct {
         ptr: *anyopaque,

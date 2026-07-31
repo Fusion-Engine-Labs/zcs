@@ -1,450 +1,61 @@
 const std = @import("std");
 const zcs = @import("zcs");
-const Io = std.Io;
-
-// ── Components ─────────────────────────────────────────────────────────
 
 const Position = struct { x: f32, y: f32 };
-const Velocity = struct { vx: f32, vy: f32 };
-const Health = struct { hp: i32, max_hp: i32 };
-const Sprite = struct { id: u32, layer: u8, _pad: [3]u8 = .{ 0, 0, 0 } };
-const Transform = struct { m: [4]f32 };
-const Tag = struct {};
-
-const Ecs = zcs.Registry(&.{ Position, Velocity, Health, Sprite, Transform, Tag });
-
-// ── Config ─────────────────────────────────────────────────────────────
-
-const Config = struct {
-    entity_count: usize = 10_000,
-    warmup: usize = 3,
-    iters: usize = 10,
-
-    fn parse(init: std.process.Init) Config {
-        var cfg = Config{};
-        var it = std.process.Args.Iterator.init(init.minimal.args);
-        _ = it.skip(); // skip argv[0]
-        while (it.next()) |arg| {
-            if (parseNamedArg(arg, "--entities=")) |v| {
-                cfg.entity_count = v;
-            } else if (parseNamedArg(arg, "--warmup=")) |v| {
-                cfg.warmup = v;
-            } else if (parseNamedArg(arg, "--iters=")) |v| {
-                cfg.iters = v;
-            }
-        }
-        return cfg;
-    }
-
-    fn parseNamedArg(arg: []const u8, prefix: []const u8) ?usize {
-        if (std.mem.startsWith(u8, arg, prefix)) {
-            return std.fmt.parseInt(usize, arg[prefix.len..], 10) catch null;
-        }
-        return null;
-    }
-};
-
-// ── Benchmark harness ──────────────────────────────────────────────────
-
-const BenchResult = struct {
-    name: []const u8,
-    total_ns: i96,
-    iters: usize,
-    entity_count: usize,
-
-    fn perIterUs(self: BenchResult) f64 {
-        return @as(f64, @floatFromInt(self.total_ns)) / @as(f64, @floatFromInt(self.iters)) / 1000.0;
-    }
-
-    fn perEntityNs(self: BenchResult) f64 {
-        return @as(f64, @floatFromInt(self.total_ns)) / @as(f64, @floatFromInt(self.iters)) / @as(f64, @floatFromInt(self.entity_count));
-    }
-
-    fn print(self: BenchResult) void {
-        std.debug.print("  {s:<30} {d:>10.1} us/iter   {d:>6.1} ns/entity\n", .{
-            self.name,
-            self.perIterUs(),
-            self.perEntityNs(),
-        });
-    }
-};
-
-fn timestamp(io: Io) i96 {
-    return Io.Timestamp.now(io, .boot).nanoseconds;
-}
-
-// ── Benchmarks ─────────────────────────────────────────────────────────
-
-fn benchSpawn(allocator: std.mem.Allocator, io: Io, cfg: Config) BenchResult {
-    var total_ns: i96 = 0;
-
-    for (0..cfg.warmup + cfg.iters) |i| {
-        var world = Ecs.World.init(allocator);
-        defer world.deinit();
-
-        const start = timestamp(io);
-        for (0..cfg.entity_count) |_| {
-            _ = world.spawn() catch unreachable;
-        }
-        const elapsed = timestamp(io) - start;
-        if (i >= cfg.warmup) total_ns += elapsed;
-    }
-
-    return .{ .name = "spawn (empty)", .total_ns = total_ns, .iters = cfg.iters, .entity_count = cfg.entity_count };
-}
-
-fn benchSpawnWithComponents(allocator: std.mem.Allocator, io: Io, cfg: Config) BenchResult {
-    var total_ns: i96 = 0;
-
-    for (0..cfg.warmup + cfg.iters) |i| {
-        var world = Ecs.World.init(allocator);
-        defer world.deinit();
-
-        const start = timestamp(io);
-        for (0..cfg.entity_count) |j| {
-            const e = world.spawn() catch unreachable;
-            const fx: f32 = @floatFromInt(j);
-            world.addComponent(e, Position, .{ .x = fx, .y = 0 }) catch unreachable;
-            world.addComponent(e, Velocity, .{ .vx = 1, .vy = 0 }) catch unreachable;
-        }
-        const elapsed = timestamp(io) - start;
-        if (i >= cfg.warmup) total_ns += elapsed;
-    }
-
-    return .{ .name = "spawn + 2 components", .total_ns = total_ns, .iters = cfg.iters, .entity_count = cfg.entity_count };
-}
-
-fn benchSpawnWithBundle(allocator: std.mem.Allocator, io: Io, cfg: Config) BenchResult {
-    var total_ns: i96 = 0;
-
-    for (0..cfg.warmup + cfg.iters) |i| {
-        var world = Ecs.World.init(allocator);
-        defer world.deinit();
-
-        const start = timestamp(io);
-        for (0..cfg.entity_count) |j| {
-            const fx: f32 = @floatFromInt(j);
-            _ = world.spawnWith(.{ Position{ .x = fx, .y = 0 }, Velocity{ .vx = 1, .vy = 0 } }) catch unreachable;
-        }
-        const elapsed = timestamp(io) - start;
-        if (i >= cfg.warmup) total_ns += elapsed;
-    }
-
-    return .{ .name = "spawnWith bundle (2 comp)", .total_ns = total_ns, .iters = cfg.iters, .entity_count = cfg.entity_count };
-}
-
-fn benchCommandBufferBundle(allocator: std.mem.Allocator, io: Io, cfg: Config) BenchResult {
-    var total_ns: i96 = 0;
-
-    for (0..cfg.warmup + cfg.iters) |i| {
-        var world = Ecs.World.init(allocator);
-        defer world.deinit();
-
-        var cmd_buf = Ecs.CommandBuffer.init(&world);
-        defer cmd_buf.deinit();
-
-        const start = timestamp(io);
-        for (0..cfg.entity_count) |j| {
-            const fx: f32 = @floatFromInt(j);
-            _ = cmd_buf.spawnWith(.{ Position{ .x = fx, .y = 0 }, Velocity{ .vx = 1, .vy = 0 } }) catch unreachable;
-        }
-        cmd_buf.flush() catch unreachable;
-        const elapsed = timestamp(io) - start;
-        if (i >= cfg.warmup) total_ns += elapsed;
-    }
-
-    return .{ .name = "cmd spawnWith+flush (2 comp)", .total_ns = total_ns, .iters = cfg.iters, .entity_count = cfg.entity_count };
-}
-
-fn benchDespawn(allocator: std.mem.Allocator, io: Io, cfg: Config) BenchResult {
-    var total_ns: i96 = 0;
-
-    for (0..cfg.warmup + cfg.iters) |i| {
-        var world = Ecs.World.init(allocator);
-        defer world.deinit();
-
-        var ids = std.ArrayListUnmanaged(zcs.EntityID).empty;
-        defer ids.deinit(allocator);
-
-        for (0..cfg.entity_count) |j| {
-            const e = world.spawn() catch unreachable;
-            const fx: f32 = @floatFromInt(j);
-            world.addComponent(e, Position, .{ .x = fx, .y = 0 }) catch unreachable;
-            world.addComponent(e, Velocity, .{ .vx = 1, .vy = 0 }) catch unreachable;
-            ids.append(allocator, e) catch unreachable;
-        }
-
-        const start = timestamp(io);
-        for (ids.items) |id| {
-            world.despawn(id);
-        }
-        const elapsed = timestamp(io) - start;
-        if (i >= cfg.warmup) total_ns += elapsed;
-    }
-
-    return .{ .name = "despawn", .total_ns = total_ns, .iters = cfg.iters, .entity_count = cfg.entity_count };
-}
-
-fn benchIterate2(allocator: std.mem.Allocator, io: Io, cfg: Config) BenchResult {
-    var world = Ecs.World.init(allocator);
-    defer world.deinit();
-
-    for (0..cfg.entity_count) |j| {
-        const e = world.spawn() catch unreachable;
-        const fx: f32 = @floatFromInt(j);
-        world.addComponent(e, Position, .{ .x = fx, .y = 0 }) catch unreachable;
-        world.addComponent(e, Velocity, .{ .vx = 1, .vy = 0 }) catch unreachable;
-    }
-
-    var total_ns: i96 = 0;
-
-    for (0..cfg.warmup + cfg.iters) |i| {
-        const start = timestamp(io);
-        var iter = world.query(.{ .write = &.{Position}, .read = &.{Velocity} });
-        while (iter.next()) |view| {
-            const positions = view.write(Position);
-            const velocities = view.read(Velocity);
-            for (positions, velocities) |*pos, vel| {
-                pos.x += vel.vx;
-                pos.y += vel.vy;
-            }
-        }
-        const elapsed = timestamp(io) - start;
-        if (i >= cfg.warmup) total_ns += elapsed;
-    }
-
-    return .{ .name = "iterate (2 components)", .total_ns = total_ns, .iters = cfg.iters, .entity_count = cfg.entity_count };
-}
-
-fn benchIterate4(allocator: std.mem.Allocator, io: Io, cfg: Config) BenchResult {
-    var world = Ecs.World.init(allocator);
-    defer world.deinit();
-
-    for (0..cfg.entity_count) |j| {
-        const e = world.spawn() catch unreachable;
-        const fx: f32 = @floatFromInt(j);
-        world.addComponent(e, Position, .{ .x = fx, .y = 0 }) catch unreachable;
-        world.addComponent(e, Velocity, .{ .vx = 1, .vy = 0 }) catch unreachable;
-        world.addComponent(e, Health, .{ .hp = 100, .max_hp = 100 }) catch unreachable;
-        world.addComponent(e, Transform, .{ .m = .{ 1, 0, 0, 1 } }) catch unreachable;
-    }
-
-    var total_ns: i96 = 0;
-
-    for (0..cfg.warmup + cfg.iters) |i| {
-        const start = timestamp(io);
-        var iter = world.query(.{ .write = &.{ Position, Transform }, .read = &.{ Velocity, Health } });
-        while (iter.next()) |view| {
-            const positions = view.write(Position);
-            const transforms = view.write(Transform);
-            const velocities = view.read(Velocity);
-            const healths = view.read(Health);
-            for (positions, transforms, velocities, healths) |*pos, *xform, vel, hp| {
-                pos.x += vel.vx;
-                pos.y += vel.vy;
-                xform.m[0] = pos.x;
-                xform.m[3] = @floatFromInt(hp.hp);
-            }
-        }
-        const elapsed = timestamp(io) - start;
-        if (i >= cfg.warmup) total_ns += elapsed;
-    }
-
-    return .{ .name = "iterate (4 components)", .total_ns = total_ns, .iters = cfg.iters, .entity_count = cfg.entity_count };
-}
-
-fn benchArchetypeMove(allocator: std.mem.Allocator, io: Io, cfg: Config) BenchResult {
-    var total_ns: i96 = 0;
-
-    for (0..cfg.warmup + cfg.iters) |i| {
-        var world = Ecs.World.init(allocator);
-        defer world.deinit();
-
-        var ids = std.ArrayListUnmanaged(zcs.EntityID).empty;
-        defer ids.deinit(allocator);
-
-        for (0..cfg.entity_count) |_| {
-            const e = world.spawn() catch unreachable;
-            world.addComponent(e, Position, .{ .x = 0, .y = 0 }) catch unreachable;
-            ids.append(allocator, e) catch unreachable;
-        }
-
-        const start = timestamp(io);
-        for (ids.items) |id| {
-            world.addComponent(id, Velocity, .{ .vx = 1, .vy = 0 }) catch unreachable;
-        }
-        const elapsed = timestamp(io) - start;
-        if (i >= cfg.warmup) total_ns += elapsed;
-    }
-
-    return .{ .name = "archetype move (add)", .total_ns = total_ns, .iters = cfg.iters, .entity_count = cfg.entity_count };
-}
-
-fn benchCommandBuffer(allocator: std.mem.Allocator, io: Io, cfg: Config) BenchResult {
-    var total_ns: i96 = 0;
-
-    for (0..cfg.warmup + cfg.iters) |i| {
-        var world = Ecs.World.init(allocator);
-        defer world.deinit();
-
-        var cmd_buf = Ecs.CommandBuffer.init(&world);
-        defer cmd_buf.deinit();
-
-        const start = timestamp(io);
-        for (0..cfg.entity_count) |j| {
-            const e = cmd_buf.spawn() catch unreachable;
-            const fx: f32 = @floatFromInt(j);
-            cmd_buf.addComponent(e, Position, .{ .x = fx, .y = 0 }) catch unreachable;
-            cmd_buf.addComponent(e, Velocity, .{ .vx = 1, .vy = 0 }) catch unreachable;
-        }
-        cmd_buf.flush() catch unreachable;
-        const elapsed = timestamp(io) - start;
-        if (i >= cfg.warmup) total_ns += elapsed;
-    }
-
-    return .{ .name = "command buffer spawn+flush", .total_ns = total_ns, .iters = cfg.iters, .entity_count = cfg.entity_count };
-}
-
-// A deliberately heavy per-entity workload, so dispatch overhead is
-// amortized and the parallel speedup is visible.
-fn heavyWork(positions: []Position, velocities: []const Velocity) void {
-    for (positions, velocities) |*pos, vel| {
-        var x = pos.x;
-        var y = pos.y;
-        var k: usize = 0;
-        while (k < 64) : (k += 1) {
-            x = @sqrt(x * x + vel.vx + 1.0) + 0.0001;
-            y = @sqrt(y * y + vel.vy + 1.0) + 0.0001;
-        }
-        pos.x = x;
-        pos.y = y;
-    }
-}
-
-fn seedHeavyWorld(world: *Ecs.World, n: usize) void {
-    for (0..n) |j| {
-        const fx: f32 = @floatFromInt(j % 100);
-        _ = world.spawnWith(.{ Position{ .x = fx, .y = fx }, Velocity{ .vx = 1, .vy = 1 } }) catch unreachable;
-    }
-}
-
-fn benchHeavySeq(allocator: std.mem.Allocator, io: Io, cfg: Config) BenchResult {
-    var world = Ecs.World.init(allocator);
-    defer world.deinit();
-    seedHeavyWorld(&world, cfg.entity_count);
-
-    var total_ns: i96 = 0;
-    for (0..cfg.warmup + cfg.iters) |i| {
-        const start = timestamp(io);
-        var iter = world.query(.{ .write = &.{Position}, .read = &.{Velocity} });
-        while (iter.next()) |view| {
-            heavyWork(view.write(Position), view.read(Velocity));
-        }
-        const elapsed = timestamp(io) - start;
-        if (i >= cfg.warmup) total_ns += elapsed;
-    }
-    return .{ .name = "heavy iterate (sequential)", .total_ns = total_ns, .iters = cfg.iters, .entity_count = cfg.entity_count };
-}
-
-fn benchHeavyPar(allocator: std.mem.Allocator, io: Io, cfg: Config) BenchResult {
-    var world = Ecs.World.init(allocator);
-    defer world.deinit();
-    seedHeavyWorld(&world, cfg.entity_count);
-
-    var pool: zcs.ThreadPool = undefined;
-    pool.init(allocator, io, 0) catch unreachable;
-    defer pool.deinit();
-
-    var total_ns: i96 = 0;
-    for (0..cfg.warmup + cfg.iters) |i| {
-        const start = timestamp(io);
-        Ecs.Parallel.forEachChunk(&pool, &world, .{ .write = &.{Position}, .read = &.{Velocity} }, {}, struct {
-            fn body(_: void, view: anytype) void {
-                heavyWork(view.write(Position), view.read(Velocity));
-            }
-        }.body) catch unreachable;
-        const elapsed = timestamp(io) - start;
-        if (i >= cfg.warmup) total_ns += elapsed;
-    }
-    return .{ .name = "heavy iterate (parallel)", .total_ns = total_ns, .iters = cfg.iters, .entity_count = cfg.entity_count };
-}
-
-fn benchGameFrame(allocator: std.mem.Allocator, io: Io, cfg: Config) BenchResult {
-    var world = Ecs.World.init(allocator);
-    defer world.deinit();
-
-    var cmd_buf = Ecs.CommandBuffer.init(&world);
-    defer cmd_buf.deinit();
-
-    for (0..cfg.entity_count) |j| {
-        const e = world.spawn() catch unreachable;
-        const fx: f32 = @floatFromInt(j);
-        world.addComponent(e, Position, .{ .x = fx, .y = 0 }) catch unreachable;
-        world.addComponent(e, Velocity, .{ .vx = 1, .vy = -0.5 }) catch unreachable;
-        if (j % 3 == 0) {
-            world.addComponent(e, Health, .{ .hp = 100, .max_hp = 100 }) catch unreachable;
-        }
-        if (j % 5 == 0) {
-            world.addComponent(e, Tag, .{}) catch unreachable;
-        }
-    }
-
-    const moveSys = struct {
-        fn run(w: *Ecs.World, _: *Ecs.CommandBuffer) anyerror!void {
-            var iter = w.query(.{ .write = &.{Position}, .read = &.{Velocity} });
-            while (iter.next()) |view| {
-                for (view.write(Position), view.read(Velocity)) |*pos, vel| {
-                    pos.x += vel.vx;
-                    pos.y += vel.vy;
-                }
-            }
-        }
-    }.run;
-
-    var total_ns: i96 = 0;
-
-    for (0..cfg.warmup + cfg.iters) |i| {
-        const start = timestamp(io);
-        Ecs.Schedule.tick(&world, &cmd_buf, .{
-            .update = &.{moveSys},
-        }) catch unreachable;
-        const elapsed = timestamp(io) - start;
-        if (i >= cfg.warmup) total_ns += elapsed;
-    }
-
-    return .{ .name = "game frame (schedule tick)", .total_ns = total_ns, .iters = cfg.iters, .entity_count = cfg.entity_count };
-}
-
-// ── Main ───────────────────────────────────────────────────────────────
+const Velocity = struct { x: f32, y: f32 };
+const entity_count = 100_000;
+const warmup_count = 3;
+const iteration_count = 10;
 
 pub fn main(init: std.process.Init) !void {
-    const cfg = Config.parse(init);
-    const allocator = init.gpa;
-    const io = init.io;
+    var spawn_total: i96 = 0;
+    var iterate_total: i96 = 0;
 
-    std.debug.print("\n  ZCS Benchmark -- {d} entities, {d} iters (warmup {d})\n", .{
-        cfg.entity_count,
-        cfg.iters,
-        cfg.warmup,
-    });
-    std.debug.print("  ------------------------------------------------------------\n", .{});
+    for (0..warmup_count + iteration_count) |iteration| {
+        var world = zcs.World.init(init.gpa);
+        defer world.deinit();
 
-    const results: [12]BenchResult = .{
-        benchSpawn(allocator, io, cfg),
-        benchSpawnWithComponents(allocator, io, cfg),
-        benchSpawnWithBundle(allocator, io, cfg),
-        benchDespawn(allocator, io, cfg),
-        benchIterate2(allocator, io, cfg),
-        benchIterate4(allocator, io, cfg),
-        benchArchetypeMove(allocator, io, cfg),
-        benchCommandBuffer(allocator, io, cfg),
-        benchCommandBufferBundle(allocator, io, cfg),
-        benchHeavySeq(allocator, io, cfg),
-        benchHeavyPar(allocator, io, cfg),
-        benchGameFrame(allocator, io, cfg),
-    };
+        const position_id = try world.registerType(Position, .{ .schema_hash = 1 });
+        const velocity_id = try world.registerType(Velocity, .{ .schema_hash = 2 });
+        if (position_id == velocity_id) {
+            return error.DuplicateComponentId;
+        }
 
-    for (&results) |r| r.print();
+        const spawn_start = timestamp(init.io);
+        var last_entity = zcs.EntityID.nil;
+        for (0..entity_count) |index| {
+            const value: f32 = @floatFromInt(index);
+            last_entity = try world.spawnWith(.{
+                Position{ .x = value, .y = 0 },
+                Velocity{ .x = 1, .y = 1 },
+            });
+        }
+        if (!world.isAlive(last_entity)) {
+            return error.SpawnFailed;
+        }
+        const spawn_elapsed = timestamp(init.io) - spawn_start;
 
-    std.debug.print("  ------------------------------------------------------------\n\n", .{});
+        const iterate_start = timestamp(init.io);
+        var query = world.query(.{ .write = &.{Position}, .read = &.{Velocity} });
+        while (query.nextChunk()) |chunk| {
+            for (chunk.write(Position), chunk.read(Velocity)) |*position, velocity| {
+                position.x += velocity.x;
+                position.y += velocity.y;
+            }
+        }
+        const iterate_elapsed = timestamp(init.io) - iterate_start;
+
+        if (iteration >= warmup_count) {
+            spawn_total += spawn_elapsed;
+            iterate_total += iterate_elapsed;
+        }
+    }
+
+    const divisor = @as(f64, @floatFromInt(iteration_count * entity_count));
+    std.debug.print("spawnWith: {d:.1} ns/entity\n", .{@as(f64, @floatFromInt(spawn_total)) / divisor});
+    std.debug.print("chunk update: {d:.1} ns/entity\n", .{@as(f64, @floatFromInt(iterate_total)) / divisor});
+}
+
+fn timestamp(io: std.Io) i96 {
+    return std.Io.Timestamp.now(io, .boot).nanoseconds;
 }

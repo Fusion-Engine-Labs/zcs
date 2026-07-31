@@ -1,4 +1,5 @@
 const std = @import("std");
+
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
@@ -9,7 +10,7 @@ const testing = std.testing;
 /// - Every issued handle has `generation >= 1`; generation 0 is reserved for
 ///   `nil`, so `nil.toRaw() == 0` and zero-initialized memory is a nil handle.
 ///   This matches the plugin-ABI shape `EntityHandle = enum(u64) { none = 0 }`
-///   (see docs/dynamic-game-architecture.md): an EntityID bitcasts 1:1 into an
+///   an EntityID bitcasts 1:1 into an
 ///   ABI handle.
 /// - `generation == max_generation` is never issued; it marks a retired slot
 ///   inside `EntityPool`.
@@ -43,7 +44,6 @@ pub const EntityID = packed struct(u64) {
 /// `EntityID.nil`.
 const first_generation: u32 = 1;
 
-/// Manages entity allocation, generation tracking, and index reuse.
 pub const EntityPool = struct {
     generations: []u32,
     free_list: std.ArrayListUnmanaged(u32),
@@ -108,13 +108,11 @@ pub const EntityPool = struct {
                     @memcpy(new_gens[0..old_len], self.generations);
                     self.allocator.free(self.generations);
                 }
+
                 self.generations = new_gens;
-                // Keep the free list able to hold every index, so `destroy` is
-                // allocation-free and can never drop a recycled index.
                 try self.free_list.ensureTotalCapacity(self.allocator, new_cap_clamped);
             }
 
-            // A retired slot exhausted its generations; skip it forever.
             if (self.generations[index] != EntityID.max_generation) {
                 break;
             }
@@ -123,14 +121,10 @@ pub const EntityPool = struct {
 
         self.len = index + 1;
         self.alive_count += 1;
-        // Read the slot's generation rather than assuming first_generation: a
-        // never-used slot is first_generation (memset), but after `clear()`
-        // reused slots carry a bumped generation so stale handles stay invalid.
+
         return .{ .index = index, .generation = self.generations[index] };
     }
 
-    /// Grow the backing storage so that up to `capacity` entity indices can
-    /// be created and destroyed without allocating.
     pub fn reserve(self: *EntityPool, capacity: u32) !void {
         if (capacity > self.generations.len) {
             const old_len = self.generations.len;
@@ -142,42 +136,42 @@ pub const EntityPool = struct {
             }
             self.generations = new_gens;
         }
-        // Keep the free list able to hold every index (see `destroy`).
+
         try self.free_list.ensureTotalCapacity(self.allocator, self.generations.len);
     }
 
     pub fn destroy(self: *EntityPool, id: EntityID) void {
-        if (!self.isAlive(id)) return;
+        if (!self.isAlive(id)) {
+            return;
+        }
+
         self.alive_count -= 1;
         const next = self.generations[id.index] + 1;
         self.generations[id.index] = next;
-        // A slot that reached max_generation is retired: it is never recycled,
-        // so no stale handle can ever alias a new one (no ABA wraparound).
         if (next == EntityID.max_generation) {
             return;
         }
-        // Capacity was reserved when the index was created, so this never
-        // allocates and never drops the index.
+
         self.free_list.appendAssumeCapacity(id.index);
     }
 
-    /// Reset the pool to empty, retaining the generations allocation. Every
-    /// live index's generation is bumped so previously-issued handles remain
-    /// invalid and cannot collide with reused indices.
     pub fn clear(self: *EntityPool) void {
         for (self.generations[0..self.len]) |*g| {
-            if (g.* != EntityID.max_generation) g.* += 1;
+            if (g.* != EntityID.max_generation) {
+                g.* += 1;
+            }
         }
+
         self.len = 0;
         self.alive_count = 0;
         self.free_list.clearRetainingCapacity();
     }
 
     pub fn isAlive(self: *const EntityPool, id: EntityID) bool {
-        // Generation 0 is reserved for nil and never issued or stored.
         if (id.generation == 0) {
             return false;
         }
+
         if (id.index >= self.len) {
             return false;
         }

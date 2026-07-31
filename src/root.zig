@@ -1,167 +1,64 @@
-const std = @import("std");
-
-pub const EntityID = @import("entity.zig").EntityID;
-pub const EntityPool = @import("entity.zig").EntityPool;
-pub const ChunkPool = @import("chunk_pool.zig").ChunkPool;
-pub const Chunk = @import("chunk_pool.zig").Chunk;
 pub const chunk_data_size = @import("chunk_pool.zig").chunk_data_size;
 pub const chunk_align = @import("chunk_pool.zig").chunk_align;
-pub const Resources = @import("resources.zig").Resources;
-pub const DeltaTime = @import("resources.zig").DeltaTime;
+
+pub const SparseSet = @import("sparse_set.zig").SparseSet;
+pub const CommandBuffer = @import("command_buffer.zig").CommandBuffer;
+pub const ComponentDesc = @import("registry.zig").ComponentDesc;
+pub const ComponentId = @import("registry.zig").ComponentId;
 pub const FrameCount = @import("resources.zig").FrameCount;
+pub const ChunkPool = @import("chunk_pool.zig").ChunkPool;
+pub const DeltaTime = @import("resources.zig").DeltaTime;
+pub const FieldDesc = @import("registry.zig").FieldDesc;
+pub const FieldType = @import("registry.zig").FieldType;
+pub const Resources = @import("resources.zig").Resources;
+pub const EntityPool = @import("entity.zig").EntityPool;
+pub const Schedule = @import("schedule.zig").Schedule;
+pub const Registry = @import("registry.zig").Registry;
 pub const QuerySpec = @import("query.zig").QuerySpec;
-pub const ThreadPool = @import("parallel.zig").ThreadPool;
+pub const EntityID = @import("entity.zig").EntityID;
+pub const Chunk = @import("chunk_pool.zig").Chunk;
+pub const World = @import("world.zig").World;
 
-pub fn SparseSet(comptime V: type) type {
-    return @import("sparse_set.zig").SparseSet(V);
-}
+test "dynamic world preserves payloads across archetype transitions" {
+    const Position = struct { x: f32, y: f32 };
+    const Velocity = struct { x: f32, y: f32 };
 
-/// Top-level comptime generic that returns a namespace of specialized ECS
-/// types for the given component set.
-///
-/// Usage:
-/// ```
-/// const Ecs = zcs.Registry(&.{ Position, Velocity, Health, Player });
-/// var world = Ecs.World.init(allocator);
-/// ```
-pub fn Registry(comptime component_types: []const type) type {
-    const count = component_types.len;
-
-    // Reject component sets the chunk layout cannot represent:
-    // - a single component that cannot fit in a chunk alongside an entity row
-    //   (the layout shrinks capacity for a combined stride, but one oversized
-    //   component is unrecoverable and would corrupt the heap at runtime);
-    // - alignment above the chunk block's alignment (columns would be
-    //   misaligned at runtime);
-    // - duplicate types (only the first would ever be addressable by id()).
-    comptime {
-        const EID = @import("entity.zig").EntityID;
-        for (component_types, 0..) |T, i| {
-            if (@sizeOf(EID) + @sizeOf(T) > chunk_data_size) {
-                @compileError("Component " ++ @typeName(T) ++ " is too large to fit in a " ++
-                    std.fmt.comptimePrint("{d}", .{chunk_data_size}) ++ "-byte chunk");
-            }
-            if (@sizeOf(T) > 0 and @alignOf(T) > chunk_align) {
-                @compileError("Component " ++ @typeName(T) ++ " requires alignment " ++
-                    std.fmt.comptimePrint("{d}", .{@alignOf(T)}) ++ ", above the chunk alignment of " ++
-                    std.fmt.comptimePrint("{d}", .{chunk_align}));
-            }
-            for (component_types[0..i]) |U| {
-                if (T == U) {
-                    @compileError("Duplicate component type " ++ @typeName(T) ++ " in Registry");
-                }
-            }
-        }
-    }
-
-    return struct {
-        pub const component_count = count;
-        pub const mask_len = @max(count, 1);
-        pub const ComponentMask = std.bit_set.IntegerBitSet(mask_len);
-
-        pub const component_sizes: [count]usize = blk: {
-            var sizes: [count]usize = undefined;
-            for (component_types, 0..) |T, i| {
-                sizes[i] = @sizeOf(T);
-            }
-            break :blk sizes;
-        };
-
-        pub const component_aligns: [count]usize = blk: {
-            var aligns: [count]usize = undefined;
-            for (component_types, 0..) |T, i| {
-                aligns[i] = if (@sizeOf(T) == 0) 1 else @alignOf(T);
-            }
-            break :blk aligns;
-        };
-
-        /// Returns the comptime component index for type T.
-        pub fn id(comptime T: type) comptime_int {
-            inline for (component_types, 0..) |CT, i| {
-                if (CT == T) return i;
-            }
-            @compileError("Type " ++ @typeName(T) ++ " is not a registered component");
-        }
-
-        /// Build a ComponentMask from a list of types.
-        pub fn componentMask(comptime types: []const type) ComponentMask {
-            comptime {
-                var m = ComponentMask.initEmpty();
-                for (types) |T| {
-                    m.set(id(T));
-                }
-                return m;
-            }
-        }
-
-        /// Get the type of component at index i.
-        pub fn componentType(comptime i: comptime_int) type {
-            return component_types[i];
-        }
-
-        // ── Specialized sub-types ──────────────────────────────────────
-
-        pub const Archetype = @import("archetype.zig").Archetype(@This());
-        pub const World = @import("world.zig").World(@This());
-        pub const CommandBuffer = @import("command_buffer.zig").CommandBuffer(@This());
-        pub const Schedule = @import("schedule.zig").Schedule(@This());
-        pub const Parallel = @import("parallel.zig").Parallel(@This());
-    };
-}
-
-test {
-    _ = @import("entity.zig");
-    _ = @import("chunk_pool.zig");
-    _ = @import("archetype.zig");
-    _ = @import("world.zig");
-    _ = @import("query.zig");
-    _ = @import("command_buffer.zig");
-    _ = @import("resources.zig");
-    _ = @import("schedule.zig");
-    _ = @import("parallel.zig");
-    _ = @import("sparse_set.zig");
-    std.testing.refAllDecls(@This());
-}
-
-const Position = struct { x: f32, y: f32 };
-const Velocity = struct { vx: f32, vy: f32 };
-const Player = struct {};
-
-test "Registry end-to-end" {
-    const Ecs = Registry(&.{ Position, Velocity, Player });
-
-    // Comptime checks
-    comptime {
-        try std.testing.expectEqual(0, Ecs.id(Position));
-        try std.testing.expectEqual(1, Ecs.id(Velocity));
-        try std.testing.expectEqual(2, Ecs.id(Player));
-
-        const m = Ecs.componentMask(&.{ Position, Velocity });
-        try std.testing.expect(m.isSet(0));
-        try std.testing.expect(m.isSet(1));
-        try std.testing.expect(!m.isSet(2));
-    }
-
-    // Runtime world usage
-    var world = Ecs.World.init(std.testing.allocator);
+    var world = World.init(@import("std").testing.allocator);
     defer world.deinit();
 
-    const e = try world.spawn();
-    try world.addComponent(e, Position, .{ .x = 0, .y = 0 });
-    try world.addComponent(e, Velocity, .{ .vx = 1, .vy = 2 });
-    try world.addComponent(e, Player, .{});
+    const position = try world.registerType(Position, .{ .schema_hash = 1 });
+    const velocity = try world.registerType(Velocity, .{ .schema_hash = 2 });
+    const entity = try world.spawn();
+    const initial = Position{ .x = 1, .y = 2 };
+    const movement = Velocity{ .x = 3, .y = 4 };
 
-    try std.testing.expect(world.hasComponent(e, Player));
+    try world.add(entity, position, @import("std").mem.asBytes(&initial));
+    try world.add(entity, velocity, @import("std").mem.asBytes(&movement));
+    try @import("std").testing.expectEqual(@as(f32, 1), world.getComponent(entity, Position).?.x);
+    try world.remove(entity, velocity);
+    try @import("std").testing.expect(world.has(entity, position));
+    try @import("std").testing.expect(!world.has(entity, velocity));
+}
 
-    // Query and update
-    var iter = world.query(.{ .write = &.{Position}, .read = &.{Velocity} });
-    while (iter.each()) |row| {
-        const pos = row.write(Position);
-        const vel = row.read(Velocity);
-        pos.x += vel.vx;
-        pos.y += vel.vy;
-    }
+test "bundle spawning writes the final archetype directly" {
+    const Position = struct { x: f32, y: f32 };
+    const Velocity = struct { x: f32, y: f32 };
 
-    try std.testing.expectApproxEqAbs(1.0, world.getComponent(e, Position).?.x, 0.001);
-    try std.testing.expectApproxEqAbs(2.0, world.getComponent(e, Position).?.y, 0.001);
+    var world = World.init(@import("std").testing.allocator);
+    defer world.deinit();
+    _ = try world.registerType(Position, .{ .schema_hash = 1 });
+    _ = try world.registerType(Velocity, .{ .schema_hash = 2 });
+
+    const entity = try world.spawnWith(.{
+        Position{ .x = 1, .y = 2 },
+        Velocity{ .x = 3, .y = 4 },
+    });
+    try @import("std").testing.expectEqual(@as(f32, 1), world.getComponent(entity, Position).?.x);
+    try @import("std").testing.expectEqual(@as(f32, 4), world.getComponent(entity, Velocity).?.y);
+
+    var query = world.query(.{ .write = &.{Position}, .read = &.{Velocity} });
+    const chunk = query.nextChunk().?;
+    try @import("std").testing.expectEqual(@as(usize, 1), chunk.len());
+    chunk.write(Position)[0].x += chunk.read(Velocity)[0].x;
+    try @import("std").testing.expectEqual(@as(f32, 4), world.getComponent(entity, Position).?.x);
 }

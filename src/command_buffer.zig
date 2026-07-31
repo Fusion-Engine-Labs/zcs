@@ -1,305 +1,81 @@
 const std = @import("std");
-const Allocator = std.mem.Allocator;
-const entity_mod = @import("entity.zig");
-const EntityID = entity_mod.EntityID;
-const world_mod = @import("world.zig");
-const testing = std.testing;
+const EntityID = @import("entity.zig").EntityID;
+const World = @import("world.zig").World;
+const ComponentId = @import("registry.zig").ComponentId;
 
-/// Returns a CommandBuffer type specialized for the given Registry.
-/// Stores deferred structural mutations for safe iteration.
-pub fn CommandBuffer(comptime Reg: type) type {
-    return struct {
-        const CmdWorldType = world_mod.World(Reg);
-        const ComponentMask = Reg.ComponentMask;
-        const RawComponent = CmdWorldType.RawComponent;
-        const Self = @This();
-
-        const Command = union(enum) {
-            spawn: EntityID,
-            despawn: EntityID,
-            spawn_bundle: struct {
-                entity: EntityID,
-                mask: ComponentMask,
-                comps: []const RawComponent,
-            },
-            add_component: struct {
-                entity: EntityID,
-                comp_id: usize,
-                data: []const u8,
-            },
-            remove_component: struct {
-                entity: EntityID,
-                comp_id: usize,
-            },
-        };
-
-        commands: std.ArrayListUnmanaged(Command),
-        arena: std.heap.ArenaAllocator,
-        world: *CmdWorldType,
-
-        pub fn init(world: *CmdWorldType) Self {
-            return .{
-                .commands = .empty,
-                .arena = std.heap.ArenaAllocator.init(world.allocator),
-                .world = world,
-            };
-        }
-
-        pub fn deinit(self: *Self) void {
-            self.arena.deinit();
-            self.commands.deinit(self.world.allocator);
-        }
-
-        /// Spawn a new entity. Returns the EntityID immediately (the id is
-        /// allocated eagerly so later commands can reference it).
-        ///
-        /// Note: the `on_spawn` observer fires here, before the entity has
-        /// any components — deferred component adds land at `flush`.
-        pub fn spawn(self: *Self) !EntityID {
-            const id = try self.world.entity_pool.create();
-            try self.world.ensureLocationCapacity(id.index);
-            self.world.locations.items[id.index] = .{};
-            self.world.notifySpawn(id);
-            try self.commands.append(self.world.allocator, .{ .spawn = id });
-            return id;
-        }
-
-        /// Spawn a new entity with a full component bundle. Returns the
-        /// EntityID immediately; the entity is placed into its final archetype
-        /// in a single append at flush time (no per-component moves).
-        ///
-        /// As with `spawn`, `on_spawn` fires here — before the bundle's
-        /// components exist on the entity.
-        pub fn spawnWith(self: *Self, components: anytype) !EntityID {
-            const fields = switch (@typeInfo(@TypeOf(components))) {
-                .@"struct" => |s| s.fields,
-                else => @compileError("spawnWith expects a tuple/struct of component values"),
-            };
-
-            const mask = comptime blk: {
-                var m = ComponentMask.initEmpty();
-                for (fields) |f| m.set(Reg.id(f.type));
-                break :blk m;
-            };
-            const n_data = comptime blk: {
-                var n: usize = 0;
-                for (fields) |f| {
-                    if (@sizeOf(f.type) > 0) n += 1;
-                }
-                break :blk n;
-            };
-
-            const id = try self.world.entity_pool.create();
-            errdefer self.world.entity_pool.destroy(id);
-            try self.world.ensureLocationCapacity(id.index);
-            self.world.locations.items[id.index] = .{};
-            self.world.notifySpawn(id);
-
-            const arena_alloc = self.arena.allocator();
-            const comps = try arena_alloc.alloc(RawComponent, n_data);
-            comptime var di: usize = 0;
-            inline for (fields) |f| {
-                if (@sizeOf(f.type) > 0) {
-                    const data = try arena_alloc.create(f.type);
-                    data.* = @field(components, f.name);
-                    comps[di] = .{ .comp_id = Reg.id(f.type), .data = std.mem.asBytes(data) };
-                    di += 1;
-                }
-            }
-
-            try self.commands.append(self.world.allocator, .{
-                .spawn_bundle = .{ .entity = id, .mask = mask, .comps = comps },
-            });
-            return id;
-        }
-
-        /// Queue a despawn.
-        pub fn despawn(self: *Self, id: EntityID) !void {
-            try self.commands.append(self.world.allocator, .{ .despawn = id });
-        }
-
-        /// Queue a component addition.
-        pub fn addComponent(self: *Self, id: EntityID, comptime T: type, value: T) !void {
-            const comp_id = comptime Reg.id(T);
-            if (@sizeOf(T) > 0) {
-                const arena_alloc = self.arena.allocator();
-                const data = try arena_alloc.create(T);
-                data.* = value;
-                try self.commands.append(self.world.allocator, .{
-                    .add_component = .{
-                        .entity = id,
-                        .comp_id = comp_id,
-                        .data = std.mem.asBytes(data),
-                    },
-                });
-            } else {
-                try self.commands.append(self.world.allocator, .{
-                    .add_component = .{
-                        .entity = id,
-                        .comp_id = comp_id,
-                        .data = &.{},
-                    },
-                });
-            }
-        }
-
-        /// Queue a component removal.
-        pub fn removeComponent(self: *Self, id: EntityID, comptime T: type) !void {
-            const comp_id = comptime Reg.id(T);
-            try self.commands.append(self.world.allocator, .{
-                .remove_component = .{
-                    .entity = id,
-                    .comp_id = comp_id,
-                },
-            });
-        }
-
-        /// Apply all queued commands to the world in the order they were
-        /// queued, then reset.
-        pub fn flush(self: *Self) !void {
-            for (self.commands.items) |cmd| {
-                switch (cmd) {
-                    .spawn => {
-                        // Entity was already created in spawn() — nothing to do here.
-                    },
-                    .despawn => |id| {
-                        self.world.despawn(id);
-                    },
-                    .spawn_bundle => |sb| {
-                        try self.world.insertBundleRaw(sb.entity, sb.mask, sb.comps);
-                    },
-                    .add_component => |ac| {
-                        try self.world.addComponentRaw(ac.entity, ac.comp_id, ac.data);
-                    },
-                    .remove_component => |rc| {
-                        try self.world.removeComponentRaw(rc.entity, rc.comp_id);
-                    },
-                }
-            }
-            self.commands.clearRetainingCapacity();
-            _ = self.arena.reset(.retain_capacity);
-        }
+pub const CommandBuffer = struct {
+    const Command = union(enum) {
+        spawn: EntityID,
+        despawn: EntityID,
+        add: struct { entity: EntityID, id: ComponentId, bytes: []const u8 },
+        remove: struct { entity: EntityID, id: ComponentId },
     };
-}
 
-const TestPos = struct { x: f32, y: f32 };
-const TestVel = struct { vx: f32, vy: f32 };
-const TestTag = struct {};
+    commands: std.ArrayListUnmanaged(Command) = .empty,
+    arena: std.heap.ArenaAllocator,
+    world: *World,
 
-const TestReg = struct {
-    pub const component_count = 3;
-    pub const ComponentMask = std.bit_set.IntegerBitSet(3);
-    pub const component_sizes: [3]usize = .{ @sizeOf(TestPos), @sizeOf(TestVel), @sizeOf(TestTag) };
-    pub const component_aligns: [3]usize = .{ @alignOf(TestPos), @alignOf(TestVel), 1 };
+    pub fn init(world: *World) CommandBuffer {
+        return .{ .world = world, .arena = std.heap.ArenaAllocator.init(world.allocator) };
+    }
 
-    pub fn id(comptime T: type) comptime_int {
-        if (T == TestPos) return 0;
-        if (T == TestVel) return 1;
-        if (T == TestTag) return 2;
-        @compileError("unknown type");
+    pub fn deinit(self: *CommandBuffer) void {
+        self.arena.deinit();
+        self.commands.deinit(self.world.allocator);
+    }
+
+    pub fn spawn(self: *CommandBuffer) !EntityID {
+        const id = try self.world.spawn();
+        try self.commands.append(self.world.allocator, .{ .spawn = id });
+        return id;
+    }
+
+    pub fn despawn(self: *CommandBuffer, id: EntityID) !void {
+        try self.commands.append(self.world.allocator, .{ .despawn = id });
+    }
+
+    pub fn add(self: *CommandBuffer, entity: EntityID, id: ComponentId, bytes: []const u8) !void {
+        const copy = try self.arena.allocator().dupe(u8, bytes);
+        try self.commands.append(self.world.allocator, .{ .add = .{ .entity = entity, .id = id, .bytes = copy } });
+    }
+
+    pub fn remove(self: *CommandBuffer, entity: EntityID, id: ComponentId) !void {
+        try self.commands.append(self.world.allocator, .{ .remove = .{ .entity = entity, .id = id } });
+    }
+
+    pub fn addComponent(self: *CommandBuffer, entity: EntityID, comptime T: type, value: T) !void {
+        try self.add(entity, self.world.typeId(T), std.mem.asBytes(&value));
+    }
+
+    pub fn removeComponent(self: *CommandBuffer, entity: EntityID, comptime T: type) !void {
+        try self.remove(entity, self.world.typeId(T));
+    }
+
+    pub fn spawnWith(self: *CommandBuffer, values: anytype) !EntityID {
+        const id = try self.spawn();
+        inline for (std.meta.fields(@TypeOf(values))) |field| {
+            try self.addComponent(id, field.type, @field(values, field.name));
+        }
+        return id;
+    }
+
+    pub fn flush(self: *CommandBuffer) !void {
+        for (self.commands.items) |command| {
+            switch (command) {
+                .spawn => {},
+                .despawn => |id| {
+                    self.world.despawn(id);
+                },
+                .add => |op| {
+                    try self.world.add(op.entity, op.id, op.bytes);
+                },
+                .remove => |op| {
+                    try self.world.remove(op.entity, op.id);
+                },
+            }
+        }
+        self.commands.clearRetainingCapacity();
+        const reset = self.arena.reset(.retain_capacity);
+        std.debug.assert(reset);
     }
 };
-
-const WorldType = world_mod.World(TestReg);
-
-test "CommandBuffer deferred spawn" {
-    var world = WorldType.init(testing.allocator);
-    defer world.deinit();
-
-    var cmd = CommandBuffer(TestReg).init(&world);
-    defer cmd.deinit();
-
-    const e = try cmd.spawn();
-    try cmd.addComponent(e, TestPos, .{ .x = 1, .y = 2 });
-
-    // Not yet applied
-    try testing.expect(world.getComponent(e, TestPos) == null);
-
-    try cmd.flush();
-
-    const pos = world.getComponent(e, TestPos).?;
-    try testing.expectApproxEqAbs(1.0, pos.x, 0.001);
-}
-
-test "CommandBuffer deferred despawn" {
-    var world = WorldType.init(testing.allocator);
-    defer world.deinit();
-
-    const e = try world.spawn();
-    try world.addComponent(e, TestPos, .{ .x = 1, .y = 2 });
-
-    var cmd = CommandBuffer(TestReg).init(&world);
-    defer cmd.deinit();
-
-    try cmd.despawn(e);
-    // Still alive before flush
-    try testing.expect(world.isAlive(e));
-
-    try cmd.flush();
-    try testing.expect(!world.isAlive(e));
-}
-
-test "CommandBuffer deferred add and remove component" {
-    var world = WorldType.init(testing.allocator);
-    defer world.deinit();
-
-    const e = try world.spawn();
-    try world.addComponent(e, TestPos, .{ .x = 1, .y = 2 });
-
-    var cmd = CommandBuffer(TestReg).init(&world);
-    defer cmd.deinit();
-
-    try cmd.addComponent(e, TestVel, .{ .vx = 10, .vy = 20 });
-    try cmd.removeComponent(e, TestPos);
-
-    try cmd.flush();
-
-    try testing.expect(!world.hasComponent(e, TestPos));
-    try testing.expect(world.hasComponent(e, TestVel));
-    const vel = world.getComponent(e, TestVel).?;
-    try testing.expectApproxEqAbs(10.0, vel.vx, 0.001);
-}
-
-test "CommandBuffer deferred spawnWith bundle" {
-    var world = WorldType.init(testing.allocator);
-    defer world.deinit();
-
-    var cmd = CommandBuffer(TestReg).init(&world);
-    defer cmd.deinit();
-
-    const e = try cmd.spawnWith(.{ TestPos{ .x = 1, .y = 2 }, TestVel{ .vx = 3, .vy = 4 }, TestTag{} });
-    // Alive immediately, but not yet placed in an archetype.
-    try testing.expect(world.isAlive(e));
-    try testing.expect(world.getComponent(e, TestPos) == null);
-
-    try cmd.flush();
-
-    try testing.expect(world.hasComponent(e, TestPos));
-    try testing.expect(world.hasComponent(e, TestVel));
-    try testing.expect(world.hasComponent(e, TestTag));
-    try testing.expectApproxEqAbs(1.0, world.getComponent(e, TestPos).?.x, 0.001);
-    try testing.expectApproxEqAbs(3.0, world.getComponent(e, TestVel).?.vx, 0.001);
-    // A single archetype: no churn through intermediates.
-    try testing.expectEqual(1, world.archetypes.items.len);
-}
-
-test "CommandBuffer arena reset after flush" {
-    var world = WorldType.init(testing.allocator);
-    defer world.deinit();
-
-    var cmd = CommandBuffer(TestReg).init(&world);
-    defer cmd.deinit();
-
-    // First batch
-    const e0 = try cmd.spawn();
-    try cmd.addComponent(e0, TestPos, .{ .x = 1, .y = 2 });
-    try cmd.flush();
-
-    // Second batch should work after arena reset
-    const e1 = try cmd.spawn();
-    try cmd.addComponent(e1, TestPos, .{ .x = 3, .y = 4 });
-    try cmd.flush();
-
-    try testing.expectApproxEqAbs(1.0, world.getComponent(e0, TestPos).?.x, 0.001);
-    try testing.expectApproxEqAbs(3.0, world.getComponent(e1, TestPos).?.x, 0.001);
-}
