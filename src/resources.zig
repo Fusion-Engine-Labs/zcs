@@ -8,6 +8,20 @@ pub const DeltaTime = struct { seconds: f32 = 0 };
 pub const FrameCount = struct { value: u64 = 0 };
 
 pub const Resources = struct {
+    pub const Scope = struct {
+        resources: *Resources,
+        previous: ?*Scope,
+        key: usize,
+        ptr: *anyopaque,
+        present: bool = true,
+
+        pub fn deinit(self: *Scope) void {
+            std.debug.assert(self.resources.scope_head == self);
+            self.resources.scope_head = self.previous;
+            self.* = undefined;
+        }
+    };
+
     const ErasedResource = struct {
         ptr: *anyopaque,
         deinit_fn: *const fn (*anyopaque, Allocator) void,
@@ -15,6 +29,7 @@ pub const Resources = struct {
 
     map: std.AutoHashMapUnmanaged(usize, ErasedResource),
     allocator: Allocator,
+    scope_head: ?*Scope = null,
 
     pub fn init(allocator: Allocator) Resources {
         return .{
@@ -24,6 +39,7 @@ pub const Resources = struct {
     }
 
     pub fn deinit(self: *Resources) void {
+        std.debug.assert(self.scope_head == null);
         var it = self.map.iterator();
         while (it.next()) |entry| {
             entry.value_ptr.deinit_fn(entry.value_ptr.ptr, self.allocator);
@@ -33,12 +49,19 @@ pub const Resources = struct {
 
     pub fn set(self: *Resources, comptime T: type, value: T) !void {
         const key = typeId(T);
+        if (self.findScope(key)) |scope| {
+            const typed: *T = @ptrCast(@alignCast(scope.ptr));
+            typed.* = value;
+            scope.present = true;
+            return;
+        }
         if (self.map.getPtr(key)) |existing| {
             const typed: *T = @ptrCast(@alignCast(existing.ptr));
             typed.* = value;
             return;
         }
         const ptr = try self.allocator.create(T);
+        errdefer self.allocator.destroy(ptr);
         ptr.* = value;
         try self.map.put(self.allocator, key, .{
             .ptr = ptr,
@@ -51,6 +74,9 @@ pub const Resources = struct {
     }
 
     pub fn getOrNull(self: *Resources, comptime T: type) ?*T {
+        if (self.findScope(typeId(T))) |scope| {
+            return if (scope.present) @ptrCast(@alignCast(scope.ptr)) else null;
+        }
         const entry = self.map.get(typeId(T)) orelse return null;
         return @ptrCast(@alignCast(entry.ptr));
     }
@@ -60,18 +86,39 @@ pub const Resources = struct {
     }
 
     pub fn getConstOrNull(self: *const Resources, comptime T: type) ?*const T {
+        if (self.findScope(typeId(T))) |scope| {
+            return if (scope.present) @ptrCast(@alignCast(scope.ptr)) else null;
+        }
         const entry = self.map.get(typeId(T)) orelse return null;
         return @ptrCast(@alignCast(entry.ptr));
     }
 
     pub fn remove(self: *Resources, comptime T: type) void {
+        if (self.findScope(typeId(T))) |scope| {
+            scope.present = false;
+            return;
+        }
         if (self.map.fetchRemove(typeId(T))) |kv| {
             kv.value.deinit_fn(kv.value.ptr, self.allocator);
         }
     }
 
     pub fn contains(self: *const Resources, comptime T: type) bool {
+        if (self.findScope(typeId(T))) |scope| return scope.present;
         return self.map.contains(typeId(T));
+    }
+
+    pub fn pushScope(self: *Resources, comptime T: type, value: *T, scope: *Scope) void {
+        scope.* = .{ .resources = self, .previous = self.scope_head, .key = typeId(T), .ptr = value };
+        self.scope_head = scope;
+    }
+
+    fn findScope(self: *const Resources, key: usize) ?*Scope {
+        var cursor = self.scope_head;
+        while (cursor) |scope| : (cursor = scope.previous) {
+            if (scope.key == key) return scope;
+        }
+        return null;
     }
 
     fn typeId(comptime T: type) usize {
@@ -143,4 +190,58 @@ test "Resources multiple types" {
 
     try testing.expectApproxEqAbs(0.016, res.get(Dt).dt, 0.0001);
     try testing.expectEqual(100, res.get(Frames).count);
+}
+
+test "borrowed scopes nest and restore owned values after removal and replacement" {
+    var res = Resources.init(testing.allocator);
+    defer res.deinit();
+    try res.set(i32, 7);
+    const original = res.get(i32);
+    var outer: i32 = 11;
+    var outer_scope: Resources.Scope = undefined;
+    res.pushScope(i32, &outer, &outer_scope);
+    {
+        defer outer_scope.deinit();
+        try testing.expectEqual(@as(i32, 11), res.getConst(i32).*);
+        var inner: i32 = 13;
+        var inner_scope: Resources.Scope = undefined;
+        res.pushScope(i32, &inner, &inner_scope);
+        {
+            defer inner_scope.deinit();
+            res.remove(i32);
+            try testing.expect(!res.contains(i32));
+            try testing.expect(res.getOrNull(i32) == null);
+            try testing.expect(res.getConstOrNull(i32) == null);
+            try res.set(i32, 17);
+            try testing.expectEqual(@as(i32, 17), inner);
+            try testing.expectEqual(@as(i32, 11), outer);
+        }
+        try testing.expectEqual(@as(i32, 11), res.get(i32).*);
+    }
+    try testing.expect(original == res.get(i32));
+    try testing.expectEqual(@as(i32, 7), original.*);
+}
+
+test "scoping an absent resource allocates nothing and restores absence" {
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    var res = Resources.init(failing.allocator());
+    defer res.deinit();
+    var value: i32 = 1;
+    var scope: Resources.Scope = undefined;
+    res.pushScope(i32, &value, &scope);
+    try res.set(i32, 2);
+    try testing.expectEqual(@as(i32, 2), res.get(i32).*);
+    scope.deinit();
+    try testing.expect(!res.contains(i32));
+    try testing.expectEqual(@as(usize, 0), failing.allocations);
+}
+
+fn testInsertFailure(allocator: Allocator) !void {
+    var res = Resources.init(allocator);
+    defer res.deinit();
+    try res.set(u64, 42);
+}
+
+test "resource insertion releases its value when map allocation fails" {
+    try testing.checkAllAllocationFailures(testing.allocator, testInsertFailure, .{});
 }

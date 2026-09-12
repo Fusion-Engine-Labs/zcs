@@ -19,14 +19,23 @@ pub fn main() !void {
         Velocity{ .x = 1, .y = 2 },
     });
 
-    var query = world.query(.{ .write = &.{Position}, .read = &.{Velocity} });
-    while (query.nextChunk()) |chunk| {
-        for (chunk.write(Position), chunk.read(Velocity)) |*position, velocity| {
-            position.x += velocity.x;
-            position.y += velocity.y;
-        }
-    }
+    var commands = zcs.CommandBuffer.init(&world);
+    defer commands.deinit();
+    try zcs.Schedule.run(&world, &commands, .{ .delta_time = 1.0 }, .{
+        .update = &.{movementSystem},
+    });
 
     const position = world.getComponent(entity, Position).?;
     std.debug.print("position: ({d}, {d})\n", .{ position.x, position.y });
+}
+
+fn movementSystem(world: *zcs.World, _: *zcs.CommandBuffer) !void {
+    const dt = world.getResource(zcs.DeltaTime).seconds;
+    var query = world.query(.{ .write = &.{Position}, .read = &.{Velocity} });
+    while (query.nextChunk()) |chunk| {
+        for (chunk.write(Position), chunk.read(Velocity)) |*position, velocity| {
+            position.x += velocity.x * dt;
+            position.y += velocity.y * dt;
+        }
+    }
 }

@@ -1,8 +1,8 @@
-# zcs (Zephyr Component System)
+# zcs (Fusion Component System)
 
 An archetype-based Entity Component System for Zig 0.16, with SoA memory layout and comptime query validation.
 
-Designed for the [Zephyr Game Engine](https://github.com/Zephyr-Engine) but fully standalone — usable in any Zig project that needs high-performance ECS.
+Designed for the [Fusion Game Engine](https://github.com/Fusion-Engine-Labs) but fully standalone — usable in any Zig project that needs high-performance ECS.
 
 ## Features
 
@@ -16,7 +16,7 @@ Designed for the [Zephyr Game Engine](https://github.com/Zephyr-Engine) but full
 - **Swap-remove deletion** — O(1) unordered entity removal with automatic back-fill from the last slot.
 - **CommandBuffer** — deferred structural mutations (spawn, spawnWith, despawn, add/remove component) safe to use during iteration.
 - **Change detection** — per-chunk/per-component write ticks; `view.changedSince(T, tick)` skips unmodified data. Spawns and archetype moves count as changes, so new data is never skipped.
-- **Schedule** — phased system execution (pre_update, update, post_update, render) with automatic CommandBuffer flushing, delta-time, and frame counting (`tickDt`).
+- **Schedule** — phased system execution (pre_update, update, post_update, render) with scoped delta time, automatic CommandBuffer flushing, and cleanup of pending commands on errors. The application owns frame counting.
 - **Resources** — world-owned, type-erased singleton storage for global game state (delta time, frame count, etc.), readable from any system.
 - **Lifecycle observers** — opt-in `on_spawn`/`on_despawn`/`on_add`/`on_remove` callbacks with near-zero cost when unused.
 - **Diagnostics** — `world.stats()` reports entity/archetype/chunk counts, occupancy, and memory use.
@@ -33,7 +33,7 @@ Designed for the [Zephyr Game Engine](https://github.com/Zephyr-Engine) but full
 Add zcs as a dependency in your `build.zig.zon`:
 
 ```sh
-zig fetch --save git+https://github.com/Zephyr-Engine/zcs.git
+zig fetch --save git+https://github.com/Fusion-Engine-Labs/zcs.git
 ```
 
 Then in your `build.zig`:
@@ -75,15 +75,16 @@ const Enemy = struct {};  // ZST tag
 
 ### Creating a registry and world
 
-Register component types at comptime, then create a world at runtime:
+Create a world and register its component types:
 
 ```zig
 const zcs = @import("zcs");
 
-const Ecs = zcs.Registry(&.{ Position, Velocity, Health, Player, Enemy });
-
-var world = Ecs.World.init(allocator);
+var world = zcs.World.init(allocator);
 defer world.deinit();
+inline for (.{ Position, Velocity, Health, Player, Enemy }) |T| {
+    _ = try world.registerType(T, .{ .schema_hash = 0 });
+}
 ```
 
 ### Spawning entities
@@ -101,7 +102,7 @@ Batch iteration yields one `View` per chunk, giving you slices for SIMD-friendly
 
 ```zig
 var iter = world.query(.{ .write = &.{Position}, .read = &.{Velocity} });
-while (iter.next()) |view| {
+while (iter.nextChunk()) |view| {
     const positions = view.write(Position);
     const velocities = view.read(Velocity);
     for (positions, velocities) |*pos, vel| {
@@ -136,7 +137,7 @@ while (iter.each()) |row| {
 Structural changes during iteration are buffered and applied on `flush()`:
 
 ```zig
-var cmd = Ecs.CommandBuffer.init(&world);
+var cmd = zcs.CommandBuffer.init(&world);
 defer cmd.deinit();
 
 const e = try cmd.spawn();
@@ -151,25 +152,50 @@ try cmd.flush();
 Systems are plain functions. The Schedule runs them in phases with automatic CommandBuffer flushing between each:
 
 ```zig
-fn movementSystem(world: *Ecs.World, _: *Ecs.CommandBuffer) !void {
+fn movementSystem(world: *zcs.World, _: *zcs.CommandBuffer) !void {
+    const dt = world.getResource(zcs.DeltaTime).seconds;
     var iter = world.query(.{ .write = &.{Position}, .read = &.{Velocity} });
-    while (iter.next()) |view| {
+    while (iter.nextChunk()) |view| {
         const positions = view.write(Position);
         const velocities = view.read(Velocity);
         for (positions, velocities) |*pos, vel| {
-            pos.x += vel.vx;
-            pos.y += vel.vy;
+            pos.x += vel.vx * dt;
+            pos.y += vel.vy * dt;
         }
     }
 }
 
-try Ecs.Schedule.tick(&world, &cmd, .{
+try zcs.Schedule.run(&world, &cmd, .{ .delta_time = 1.0 / 60.0 }, .{
     .pre_update = &.{gravitySystem},
     .update = &.{ movementSystem, damageSystem },
     .post_update = &.{collisionSystem},
     .render = &.{renderSystem},
 });
 ```
+
+`Schedule.run` executes the supplied schedule once. It exposes
+`zcs.DeltaTime{ .seconds = context.delta_time }` for that invocation and restores
+the previous resource, or its absence, on every return path. The context accepts
+finite, nonnegative deltas, including zero. It does not create or increment
+`FrameCount`: the application owns frame and fixed-simulation counters and decides
+how often to call the runner. Each invocation advances `World.currentTick()` for
+ECS change detection, independently of those application counters.
+
+Nested invocations restore their caller's timing and isolate pending commands,
+including when they share a command buffer. Each phase flushes only commands
+belonging to its invocation; the caller's pending prefix remains queued. Commands
+queued before a top-level invocation starts are included in that invocation.
+A nested invocation's successful flushes are committed even if the caller later
+fails.
+
+When a system fails, the runner discards its unflushed commands and reclaims
+entities created by those pending spawn commands. If a flush fails midway,
+already-applied commands remain committed and the remaining commands are
+discarded. Direct component writes also remain committed. This is command cleanup,
+not a transaction over the ECS world. `CommandBuffer.discard()` exposes the same
+cleanup explicitly, and `deinit()` discards abandoned pending spawns. Component
+payload bytes are copied shallowly; callers retain responsibility for allocations
+referenced by their fields.
 
 ### Resources
 
@@ -187,6 +213,23 @@ try resources.set(FrameCount, .{ .count = 0 });
 
 const dt = resources.get(DeltaTime).dt;
 ```
+
+Temporary resource overrides can be installed without allocating:
+
+```zig
+var value: zcs.DeltaTime = .{ .seconds = 0.01 };
+var scope: zcs.Resources.Scope = undefined;
+world.resources.pushScope(zcs.DeltaTime, &value, &scope);
+defer scope.deinit();
+// world.getResource(zcs.DeltaTime) now reads value.
+```
+
+Keep the value and scope at stable addresses, and close scopes in reverse order.
+Within a scope, `setResource` updates the borrowed value and `removeResource`
+hides it until it is set again or the scope closes. The owned resource underneath
+is untouched. Pointers to scoped resources, including scheduler-provided
+`DeltaTime`, must not escape their invocation. Nested scopes are synchronous;
+resource stores and command buffers require exclusive access during execution.
 
 ### SparseSet
 

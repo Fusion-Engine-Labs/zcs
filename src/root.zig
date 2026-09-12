@@ -62,3 +62,8 @@ test "bundle spawning writes the final archetype directly" {
     chunk.write(Position)[0].x += chunk.read(Velocity)[0].x;
     try @import("std").testing.expectEqual(@as(f32, 4), world.getComponent(entity, Position).?.x);
 }
+
+test {
+    _ = @import("schedule.zig");
+    _ = @import("command_buffer.zig");
+}
