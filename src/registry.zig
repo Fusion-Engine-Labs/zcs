@@ -43,11 +43,7 @@ pub const Registry = struct {
 
     pub fn deinit(self: *Registry) void {
         for (self.descs.items) |entry| {
-            self.allocator.free(entry.name);
-            for (entry.fields) |field| {
-                self.allocator.free(field.name);
-            }
-            self.allocator.free(entry.fields);
+            self.freeDesc(entry);
         }
         self.descs.deinit(self.allocator);
         self.by_name.deinit(self.allocator);
@@ -82,17 +78,14 @@ pub const Registry = struct {
             return error.TooManyComponents;
         }
 
+        try self.descs.ensureUnusedCapacity(self.allocator, 1);
+        try self.by_name.ensureUnusedCapacity(self.allocator, 1);
+
         const copied = try self.dupeDesc(input);
+        errdefer self.freeDesc(copied);
         const component_id: ComponentId = @enumFromInt(@as(u32, @intCast(self.descs.items.len + 1)));
-        self.descs.append(self.allocator, copied) catch |err| {
-            self.freeDesc(copied);
-            return err;
-        };
-        errdefer {
-            const removed = self.descs.pop().?;
-            self.freeDesc(removed);
-        }
-        try self.by_name.put(self.allocator, copied.name, component_id);
+        self.descs.appendAssumeCapacity(copied);
+        self.by_name.putAssumeCapacityNoClobber(copied.name, component_id);
         return component_id;
     }
 
@@ -112,14 +105,12 @@ pub const Registry = struct {
 
         const fields = try self.allocator.alloc(FieldDesc, input.fields.len);
         errdefer self.allocator.free(fields);
+        var initialized: usize = 0;
+        errdefer for (fields[0..initialized]) |field| self.allocator.free(field.name);
 
         for (input.fields, 0..) |field, i| {
             fields[i] = .{ .name = try self.allocator.dupe(u8, field.name), .type = field.type, .offset = field.offset };
-            errdefer {
-                for (fields[0 .. i + 1]) |copied| {
-                    self.allocator.free(copied.name);
-                }
-            }
+            initialized += 1;
         }
 
         return .{ .name = name, .size = input.size, .alignment = input.alignment, .schema_hash = input.schema_hash, .fields = fields };
@@ -144,4 +135,27 @@ test "registry deep copies descriptors" {
     field_name[0] = 'y';
     try std.testing.expectEqualStrings("Test", registry.desc(id).name);
     try std.testing.expectEqualStrings("x", registry.desc(id).fields[0].name);
+}
+
+fn testRegisterFailure(allocator: std.mem.Allocator) !void {
+    var registry = Registry.init(allocator);
+    defer registry.deinit();
+    _ = registry.register(.{
+        .name = "Test",
+        .size = 8,
+        .alignment = 4,
+        .schema_hash = 7,
+        .fields = &.{
+            .{ .name = "x", .type = .float, .offset = 0 },
+            .{ .name = "y", .type = .float, .offset = 4 },
+        },
+    }) catch |err| {
+        try std.testing.expectEqual(@as(usize, 0), registry.count());
+        try std.testing.expect(registry.id("Test") == null);
+        return err;
+    };
+}
+
+test "registry insertion is failure-safe" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, testRegisterFailure, .{});
 }

@@ -41,13 +41,13 @@ pub const ChunkPool = struct {
             chunk.count = 0;
             return chunk;
         }
+
+        try self.allocated.ensureUnusedCapacity(self.allocator, 1);
+        // Every allocated chunk may eventually be returned to the free list.
+        try self.free_list.ensureTotalCapacity(self.allocator, self.allocated.items.len + 1);
         const chunk = try self.allocator.create(Chunk);
-        errdefer self.allocator.destroy(chunk);
         chunk.* = .{};
-        try self.allocated.append(self.allocator, chunk);
-        // Keep the free list able to hold every live chunk, so `free` is
-        // allocation-free and can never drop a chunk back into a leak.
-        try self.free_list.ensureTotalCapacity(self.allocator, self.allocated.items.len);
+        self.allocated.appendAssumeCapacity(chunk);
         return chunk;
     }
 
@@ -96,4 +96,14 @@ test "ChunkPool preWarm" {
         _ = try pool.alloc();
     }
     try testing.expectEqual(0, pool.free_list.items.len);
+}
+
+fn testAllocFailure(allocator: Allocator) !void {
+    var pool = ChunkPool.init(allocator);
+    defer pool.deinit();
+    _ = try pool.alloc();
+}
+
+test "ChunkPool allocation is failure-safe" {
+    try testing.checkAllAllocationFailures(testing.allocator, testAllocFailure, .{});
 }

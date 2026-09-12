@@ -26,8 +26,7 @@ pub fn QueryIterator(comptime spec: QuerySpec) type {
         row_index: usize = 0,
 
         pub fn init(world: *World) Self {
-            var self: Self = undefined;
-            self.world = world;
+            var self: Self = .{ .world = world, .required = undefined, .excluded = undefined };
 
             comptime var n = 0;
             inline for (spec.read) |T| {
@@ -49,12 +48,6 @@ pub fn QueryIterator(comptime spec: QuerySpec) type {
                 self.excluded[i] = world.typeId(T);
             }
 
-            self.arch_index = 0;
-            self.chunk_index = 0;
-            self.columns = .{null} ** required_len;
-            self.tick_indices = .{null} ** required_len;
-            self.row_view = null;
-            self.row_index = 0;
             return self;
         }
         fn matches(self: *const Self, arch: *const Archetype) bool {

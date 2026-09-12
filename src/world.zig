@@ -46,7 +46,7 @@ pub const World = struct {
 
     pub fn deinit(self: *Self) void {
         for (self.archetypes.items) |arch| {
-            arch.deinit(self.allocator);
+            arch.deinit();
             self.allocator.destroy(arch);
         }
 
@@ -100,16 +100,9 @@ pub const World = struct {
             return id;
         }
 
-        const name: []const u8 = blk: {
-            if (opts.name) |registered_name| {
-                break :blk registered_name;
-            }
-            break :blk key;
-        };
-
-        const hash = opts.schema_hash;
-        const id = try self.registry.register(.{ .name = name, .size = @sizeOf(T), .alignment = @max(@alignOf(T), 1), .schema_hash = hash, .fields = comptime fieldDescs(T) });
-        try self.type_ids.put(self.allocator, key, id);
+        try self.type_ids.ensureUnusedCapacity(self.allocator, 1);
+        const id = try self.registry.register(.{ .name = opts.name orelse key, .size = @sizeOf(T), .alignment = @max(@alignOf(T), 1), .schema_hash = opts.schema_hash, .fields = comptime fieldDescs(T) });
+        self.type_ids.putAssumeCapacityNoClobber(key, id);
         return id;
     }
 
@@ -218,7 +211,7 @@ pub const World = struct {
             }
         } else {
             const arch = try self.singleArchetype(component);
-            const result = try arch.appendEntity(self.allocator, id);
+            const result = try arch.appendEntity(id);
             if (arch.column(component)) |col| {
                 @memcpy(Archetype.cell(arch.chunks.items[result.chunk_idx], result.row, col), bytes);
             }
@@ -325,7 +318,7 @@ pub const World = struct {
         const id = try self.entity_pool.create();
         errdefer self.entity_pool.destroy(id);
         try self.ensureLocationCapacity(id.index);
-        const result = try arch.appendEntity(self.allocator, id);
+        const result = try arch.appendEntity(id);
         const chunk = arch.chunks.items[result.chunk_idx];
         inline for (fields, 0..) |field, i| {
             if (@sizeOf(field.type) > 0) {
@@ -356,13 +349,9 @@ pub const World = struct {
     }
 
     fn maskWith(self: *Self, old: std.DynamicBitSetUnmanaged, component: ComponentId, present: bool) !std.DynamicBitSetUnmanaged {
-        var mask = try std.DynamicBitSetUnmanaged.initEmpty(self.allocator, self.registry.count());
-        var bit: usize = 0;
-        while (bit < old.bit_length) : (bit += 1) {
-            if (old.isSet(bit)) {
-                mask.set(bit);
-            }
-        }
+        var mask = try old.clone(self.allocator);
+        errdefer mask.deinit(self.allocator);
+        try mask.resize(self.allocator, self.registry.count(), false);
         if (present) {
             mask.set(@intFromEnum(component) - 1);
         } else {
@@ -388,7 +377,7 @@ pub const World = struct {
         };
         errdefer self.allocator.destroy(arch);
         arch.* = try Archetype.init(self.allocator, &self.registry, owned_mask, &self.chunk_pool);
-        errdefer arch.deinit(self.allocator);
+        errdefer arch.deinit();
         try self.archetypes.append(self.allocator, arch);
         errdefer _ = self.archetypes.pop();
         const bucket = try self.archetype_buckets.getOrPut(self.allocator, signature);
@@ -421,7 +410,7 @@ pub const World = struct {
     fn move(self: *Self, id: EntityID, loc: *EntityLocation, src: *Archetype, dst: *Archetype) !void {
         const old_chunk = src.chunks.items[loc.chunk_idx];
         const old_row = loc.row;
-        const result = try dst.appendEntity(self.allocator, id);
+        const result = try dst.appendEntity(id);
         const new_chunk = dst.chunks.items[result.chunk_idx];
         for (src.columns.items) |col| {
             if (dst.column(col.id)) |dst_col| {
@@ -487,14 +476,10 @@ pub const World = struct {
     }
 
     fn masksEqual(a: std.DynamicBitSetUnmanaged, b: std.DynamicBitSetUnmanaged) bool {
-        const n = @max(a.bit_length, b.bit_length);
-        var bit: usize = 0;
-        while (bit < n) : (bit += 1) {
-            const av = bit < a.bit_length and a.isSet(bit);
-            const bv = bit < b.bit_length and b.isSet(bit);
-            if (av != bv) {
-                return false;
-            }
+        if (a.count() != b.count()) return false;
+        var bits = a.iterator(.{});
+        while (bits.next()) |bit| {
+            if (bit >= b.bit_length or !b.isSet(bit)) return false;
         }
         return true;
     }
@@ -510,15 +495,11 @@ pub const World = struct {
 
     fn maskSignature(mask: std.DynamicBitSetUnmanaged) u64 {
         var signature: u64 = 0;
-        var count: usize = 0;
-        var bit: usize = 0;
-        while (bit < mask.bit_length) : (bit += 1) {
-            if (mask.isSet(bit)) {
-                signature ^= componentSignature(@enumFromInt(@as(u32, @intCast(bit + 1))));
-                count += 1;
-            }
+        var bits = mask.iterator(.{});
+        while (bits.next()) |bit| {
+            signature ^= componentSignature(@enumFromInt(@as(u32, @intCast(bit + 1))));
         }
-        return signature ^ (@as(u64, @intCast(count)) *% 0x9e3779b97f4a7c15);
+        return signature ^ (@as(u64, @intCast(mask.count())) *% 0x9e3779b97f4a7c15);
     }
 
     fn componentSignature(id: ComponentId) u64 {
@@ -529,3 +510,18 @@ pub const World = struct {
         return value ^ (value >> 31);
     }
 };
+
+fn testRegisterTypeFailure(allocator: std.mem.Allocator) !void {
+    const Position = struct { x: f32, y: f32 };
+    var world = World.init(allocator);
+    defer world.deinit();
+    _ = world.registerType(Position, .{ .schema_hash = 1 }) catch |err| {
+        try std.testing.expectEqual(@as(usize, 0), world.registry.count());
+        try std.testing.expect(world.componentId(Position) == null);
+        return err;
+    };
+}
+
+test "typed registration is failure-safe" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, testRegisterTypeFailure, .{});
+}

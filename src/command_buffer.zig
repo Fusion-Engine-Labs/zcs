@@ -52,8 +52,9 @@ pub const CommandBuffer = struct {
     }
 
     pub fn add(self: *CommandBuffer, entity: EntityID, id: ComponentId, bytes: []const u8) !void {
+        try self.commands.ensureUnusedCapacity(self.world.allocator, 1);
         const copy = try self.arena.allocator().dupe(u8, bytes);
-        try self.commands.append(self.world.allocator, .{ .add = .{ .entity = entity, .id = id, .bytes = copy } });
+        self.commands.appendAssumeCapacity(.{ .add = .{ .entity = entity, .id = id, .bytes = copy } });
     }
 
     pub fn remove(self: *CommandBuffer, entity: EntityID, id: ComponentId) !void {

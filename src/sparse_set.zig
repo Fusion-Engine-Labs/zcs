@@ -36,42 +36,38 @@ pub fn SparseSet(comptime V: type) type {
             const result = try self.sparse.getOrPut(self.allocator, id.index);
             if (result.found_existing) {
                 const dense_idx = result.value_ptr.*;
-                // Verify generation matches
                 if (!self.dense_entities.items[dense_idx].eql(id)) {
-                    // Stale entry — overwrite
                     self.dense_entities.items[dense_idx] = id;
                 }
                 self.dense_values.items[dense_idx] = value;
             } else {
+                errdefer _ = self.sparse.remove(id.index);
                 const dense_idx: u32 = @intCast(self.dense_entities.items.len);
                 try self.dense_entities.append(self.allocator, id);
+                errdefer _ = self.dense_entities.pop();
                 try self.dense_values.append(self.allocator, value);
                 result.value_ptr.* = dense_idx;
             }
         }
 
         pub fn get(self: *Self, id: EntityID) ?*V {
-            const dense_idx = self.sparse.get(id.index) orelse return null;
-            if (!self.dense_entities.items[dense_idx].eql(id)) return null;
+            const dense_idx = self.denseIndex(id) orelse return null;
             return &self.dense_values.items[dense_idx];
         }
 
         pub fn getConst(self: *const Self, id: EntityID) ?*const V {
-            const dense_idx = self.sparse.get(id.index) orelse return null;
-            if (!self.dense_entities.items[dense_idx].eql(id)) return null;
+            const dense_idx = self.denseIndex(id) orelse return null;
             return &self.dense_values.items[dense_idx];
         }
 
         pub fn contains(self: *const Self, id: EntityID) bool {
-            const dense_idx = self.sparse.get(id.index) orelse return false;
-            return self.dense_entities.items[dense_idx].eql(id);
+            return self.denseIndex(id) != null;
         }
 
         pub fn remove(self: *Self, id: EntityID) void {
             const dense_idx_ptr = self.sparse.getPtr(id.index) orelse return;
             const dense_idx = dense_idx_ptr.*;
 
-            // Verify generation
             if (!self.dense_entities.items[dense_idx].eql(id)) return;
 
             const last_idx: u32 = @intCast(self.dense_entities.items.len - 1);
@@ -88,6 +84,12 @@ pub fn SparseSet(comptime V: type) type {
             _ = self.dense_entities.pop();
             _ = self.dense_values.pop();
             _ = self.sparse.remove(id.index);
+        }
+
+        fn denseIndex(self: *const Self, id: EntityID) ?u32 {
+            const dense_idx = self.sparse.get(id.index) orelse return null;
+            if (!self.dense_entities.items[dense_idx].eql(id)) return null;
+            return dense_idx;
         }
 
         pub fn count(self: *const Self) usize {
@@ -180,4 +182,19 @@ test "SparseSet iteration" {
         sum += v;
     }
     try testing.expectEqual(300, sum);
+}
+
+fn testSetFailure(allocator: Allocator) !void {
+    var set = SparseSet(i32).init(allocator);
+    defer set.deinit();
+    const entity: EntityID = .{ .index = 1, .generation = 1 };
+    set.set(entity, 42) catch |err| {
+        try testing.expectEqual(@as(usize, 0), set.count());
+        try testing.expect(!set.contains(entity));
+        return err;
+    };
+}
+
+test "SparseSet insertion is failure-safe" {
+    try testing.checkAllAllocationFailures(testing.allocator, testSetFailure, .{});
 }

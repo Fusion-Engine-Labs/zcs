@@ -32,15 +32,9 @@ pub const Archetype = struct {
         errdefer self.change_ids.deinit(allocator);
         errdefer self.columns.deinit(allocator);
         var stride: usize = @sizeOf(EntityID);
-        var component_count: u32 = 0;
-        var bit: usize = 0;
-        while (bit < mask.bit_length) : (bit += 1) {
-            if (!mask.isSet(bit)) {
-                continue;
-            }
-            component_count += 1;
+        var bits = mask.iterator(.{});
+        while (bits.next()) |bit| {
             const id: ComponentId = @enumFromInt(@as(u32, @intCast(bit + 1)));
-            try self.change_ids.append(allocator, id);
             const desc = registry.desc(id);
             if (desc.size > 0) {
                 stride += desc.size;
@@ -55,12 +49,10 @@ pub const Archetype = struct {
         }
 
         var offset: usize = @as(usize, self.capacity) * @sizeOf(EntityID);
-        bit = 0;
-        while (bit < mask.bit_length) : (bit += 1) {
-            if (!mask.isSet(bit)) {
-                continue;
-            }
+        bits = mask.iterator(.{});
+        while (bits.next()) |bit| {
             const id: ComponentId = @enumFromInt(@as(u32, @intCast(bit + 1)));
+            try self.change_ids.append(allocator, id);
             const desc = registry.desc(id);
             if (desc.size == 0) {
                 continue;
@@ -69,19 +61,19 @@ pub const Archetype = struct {
             try self.columns.append(allocator, .{ .id = id, .offset = @intCast(offset), .size = desc.size });
             offset += @as(usize, self.capacity) * desc.size;
         }
-        self.component_count = component_count;
+        self.component_count = @intCast(mask.count());
         return self;
     }
 
-    pub fn deinit(self: *Archetype, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *Archetype) void {
         for (self.change_ticks.items) |ticks| {
-            allocator.free(ticks);
+            self.allocator.free(ticks);
         }
-        self.change_ticks.deinit(allocator);
-        self.change_ids.deinit(allocator);
-        self.chunks.deinit(allocator);
-        self.columns.deinit(allocator);
-        self.mask.deinit(allocator);
+        self.change_ticks.deinit(self.allocator);
+        self.change_ids.deinit(self.allocator);
+        self.chunks.deinit(self.allocator);
+        self.columns.deinit(self.allocator);
+        self.mask.deinit(self.allocator);
     }
 
     /// Reset entity storage while retaining the archetype and its layout.
@@ -130,12 +122,12 @@ pub const Archetype = struct {
         return null;
     }
 
-    pub fn appendEntity(self: *Archetype, allocator: std.mem.Allocator, id: EntityID) !AppendResult {
+    pub fn appendEntity(self: *Archetype, id: EntityID) !AppendResult {
         if (self.chunks.items.len == 0 or self.chunks.items[self.chunks.items.len - 1].count >= self.capacity) {
-            try self.chunks.ensureUnusedCapacity(allocator, 1);
-            try self.change_ticks.ensureUnusedCapacity(allocator, 1);
-            const ticks = try allocator.alloc(u64, self.change_ids.items.len);
-            errdefer allocator.free(ticks);
+            try self.chunks.ensureUnusedCapacity(self.allocator, 1);
+            try self.change_ticks.ensureUnusedCapacity(self.allocator, 1);
+            const ticks = try self.allocator.alloc(u64, self.change_ids.items.len);
+            errdefer self.allocator.free(ticks);
             @memset(ticks, 0);
             const chunk = try self.pool.alloc();
             self.chunks.appendAssumeCapacity(chunk);
@@ -202,11 +194,8 @@ pub const Archetype = struct {
     }
     fn layoutBytes(self: *const Archetype, registry: *const Registry, capacity: u16) ?usize {
         var offset = @as(usize, capacity) * @sizeOf(EntityID);
-        var bit: usize = 0;
-        while (bit < self.mask.bit_length) : (bit += 1) {
-            if (!self.mask.isSet(bit)) {
-                continue;
-            }
+        var bits = self.mask.iterator(.{});
+        while (bits.next()) |bit| {
             const desc = registry.desc(@enumFromInt(@as(u32, @intCast(bit + 1))));
             if (desc.size == 0) {
                 continue;

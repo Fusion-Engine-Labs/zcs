@@ -8,11 +8,8 @@ pub fn main() !void {
     var world = zcs.World.init(std.heap.page_allocator);
     defer world.deinit();
 
-    const position_id = try world.registerType(Position, .{ .schema_hash = 1 });
-    const velocity_id = try world.registerType(Velocity, .{ .schema_hash = 2 });
-    if (position_id == velocity_id) {
-        return error.DuplicateComponentId;
-    }
+    _ = try world.registerType(Position, .{ .schema_hash = 1 });
+    _ = try world.registerType(Velocity, .{ .schema_hash = 2 });
 
     const entity = try world.spawnWith(.{
         Position{ .x = 0, .y = 0 },

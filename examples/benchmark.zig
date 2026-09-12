@@ -15,11 +15,8 @@ pub fn main(init: std.process.Init) !void {
         var world = zcs.World.init(init.gpa);
         defer world.deinit();
 
-        const position_id = try world.registerType(Position, .{ .schema_hash = 1 });
-        const velocity_id = try world.registerType(Velocity, .{ .schema_hash = 2 });
-        if (position_id == velocity_id) {
-            return error.DuplicateComponentId;
-        }
+        _ = try world.registerType(Position, .{ .schema_hash = 1 });
+        _ = try world.registerType(Velocity, .{ .schema_hash = 2 });
 
         const spawn_start = timestamp(init.io);
         var last_entity = zcs.EntityID.nil;

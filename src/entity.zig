@@ -62,21 +62,10 @@ pub const EntityPool = struct {
     }
 
     pub fn initCapacity(allocator: Allocator, capacity: u32) !EntityPool {
-        const gens = try allocator.alloc(u32, capacity);
-        errdefer allocator.free(gens);
-        @memset(gens, first_generation);
-        var free_list: std.ArrayListUnmanaged(u32) = .empty;
-        // Reserve so `destroy` never needs to allocate (and can't silently drop
-        // a recycled index): the free list never exceeds `generations.len`.
-        errdefer free_list.deinit(allocator);
-        try free_list.ensureTotalCapacity(allocator, capacity);
-        return .{
-            .generations = gens,
-            .free_list = free_list,
-            .alive_count = 0,
-            .len = 0,
-            .allocator = allocator,
-        };
+        var self = EntityPool.init(allocator);
+        errdefer self.deinit();
+        try self.ensureCapacity(capacity);
+        return self;
     }
 
     pub fn deinit(self: *EntityPool) void {
@@ -102,15 +91,7 @@ pub const EntityPool = struct {
                 const old_len = self.generations.len;
                 const new_cap = @max(old_len * 2, 64);
                 const new_cap_clamped: usize = @min(new_cap, @as(usize, std.math.maxInt(u32)) + 1);
-                const new_gens = try self.allocator.alloc(u32, new_cap_clamped);
-                @memset(new_gens[old_len..], first_generation);
-                if (old_len > 0) {
-                    @memcpy(new_gens[0..old_len], self.generations);
-                    self.allocator.free(self.generations);
-                }
-
-                self.generations = new_gens;
-                try self.free_list.ensureTotalCapacity(self.allocator, new_cap_clamped);
+                try self.ensureCapacity(new_cap_clamped);
             }
 
             if (self.generations[index] != EntityID.max_generation) {
@@ -126,18 +107,7 @@ pub const EntityPool = struct {
     }
 
     pub fn reserve(self: *EntityPool, capacity: u32) !void {
-        if (capacity > self.generations.len) {
-            const old_len = self.generations.len;
-            const new_gens = try self.allocator.alloc(u32, capacity);
-            @memset(new_gens[old_len..], first_generation);
-            if (old_len > 0) {
-                @memcpy(new_gens[0..old_len], self.generations);
-                self.allocator.free(self.generations);
-            }
-            self.generations = new_gens;
-        }
-
-        try self.free_list.ensureTotalCapacity(self.allocator, self.generations.len);
+        try self.ensureCapacity(capacity);
     }
 
     pub fn destroy(self: *EntityPool, id: EntityID) void {
@@ -168,14 +138,22 @@ pub const EntityPool = struct {
     }
 
     pub fn isAlive(self: *const EntityPool, id: EntityID) bool {
-        if (id.generation == 0) {
-            return false;
-        }
+        return id.generation != 0 and id.index < self.len and self.generations[id.index] == id.generation;
+    }
 
-        if (id.index >= self.len) {
-            return false;
-        }
-        return self.generations[id.index] == id.generation;
+    fn ensureCapacity(self: *EntityPool, capacity: usize) !void {
+        if (capacity <= self.generations.len) return;
+
+        // Keep `destroy` allocation-free before exposing any new entity slots.
+        try self.free_list.ensureTotalCapacity(self.allocator, capacity);
+
+        const old_len = self.generations.len;
+        const generations = if (old_len == 0)
+            try self.allocator.alloc(u32, capacity)
+        else
+            try self.allocator.realloc(self.generations, capacity);
+        @memset(generations[old_len..], first_generation);
+        self.generations = generations;
     }
 };
 
@@ -344,4 +322,13 @@ test "EntityPool create skips retired slots after clear" {
     const e1 = try pool.create();
     try testing.expect(e1.index != e0.index);
     try testing.expect(pool.isAlive(e1));
+}
+
+fn testInitCapacityFailure(allocator: Allocator) !void {
+    var pool = try EntityPool.initCapacity(allocator, 100);
+    defer pool.deinit();
+}
+
+test "EntityPool initialization is failure-safe" {
+    try testing.checkAllAllocationFailures(testing.allocator, testInitCapacityFailure, .{});
 }
