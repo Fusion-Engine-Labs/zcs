@@ -11,7 +11,7 @@ pub const Resources = struct {
     pub const Scope = struct {
         resources: *Resources,
         previous: ?*Scope,
-        key: usize,
+        key: []const u8,
         ptr: *anyopaque,
         present: bool = true,
 
@@ -27,7 +27,7 @@ pub const Resources = struct {
         deinit_fn: *const fn (*anyopaque, Allocator) void,
     };
 
-    map: std.AutoHashMapUnmanaged(usize, ErasedResource),
+    map: std.StringHashMapUnmanaged(ErasedResource),
     allocator: Allocator,
     scope_head: ?*Scope = null,
 
@@ -104,7 +104,9 @@ pub const Resources = struct {
     }
 
     pub fn contains(self: *const Resources, comptime T: type) bool {
-        if (self.findScope(typeId(T))) |scope| return scope.present;
+        if (self.findScope(typeId(T))) |scope| {
+            return scope.present;
+        }
         return self.map.contains(typeId(T));
     }
 
@@ -113,23 +115,18 @@ pub const Resources = struct {
         self.scope_head = scope;
     }
 
-    fn findScope(self: *const Resources, key: usize) ?*Scope {
+    fn findScope(self: *const Resources, key: []const u8) ?*Scope {
         var cursor = self.scope_head;
         while (cursor) |scope| : (cursor = scope.previous) {
-            if (scope.key == key) return scope;
+            if (std.mem.eql(u8, scope.key, key)) {
+                return scope;
+            }
         }
         return null;
     }
 
-    fn typeId(comptime T: type) usize {
-        const H = struct {
-            // Use T to make this struct unique per type instantiation.
-            comptime {
-                _ = T;
-            }
-            var byte: u8 = 0;
-        };
-        return @intFromPtr(&H.byte);
+    fn typeId(comptime T: type) []const u8 {
+        return @typeName(T);
     }
 
     fn makeDeinitFn(comptime T: type) *const fn (*anyopaque, Allocator) void {
