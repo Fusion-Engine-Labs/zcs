@@ -23,6 +23,7 @@ pub const Registry = registry.Registry;
 pub const QuerySpec = @import("query.zig").QuerySpec;
 pub const EntityID = entity_mod.EntityID;
 pub const Chunk = chunk_pool.Chunk;
+pub const Archetype = @import("archetype.zig").Archetype;
 pub const World = @import("world.zig").World;
 
 test "dynamic world preserves payloads across archetype transitions" {
