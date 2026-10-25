@@ -83,7 +83,7 @@ pub const Registry = struct {
 
         const copied = try self.dupeDesc(input);
         errdefer self.freeDesc(copied);
-        const component_id: ComponentId = @enumFromInt(@as(u32, @intCast(self.descs.items.len + 1)));
+        const component_id: ComponentId = @fromBackingInt(@as(u32, @intCast(self.descs.items.len + 1)));
         self.descs.appendAssumeCapacity(copied);
         self.by_name.putAssumeCapacityNoClobber(copied.name, component_id);
         return component_id;
@@ -94,7 +94,7 @@ pub const Registry = struct {
     }
 
     pub fn desc(self: *const Registry, component: ComponentId) *const ComponentDesc {
-        const ordinal = @intFromEnum(component);
+        const ordinal = @backingInt(component);
         std.debug.assert(ordinal != 0 and ordinal <= self.descs.items.len);
         return &self.descs.items[ordinal - 1];
     }
