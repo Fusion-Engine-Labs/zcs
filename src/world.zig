@@ -353,9 +353,9 @@ pub const World = struct {
         errdefer mask.deinit(self.allocator);
         try mask.resize(self.allocator, self.registry.count(), false);
         if (present) {
-            mask.set(@intFromEnum(component) - 1);
+            mask.set(@backingInt(component) - 1);
         } else {
-            mask.unset(@intFromEnum(component) - 1);
+            mask.unset(@backingInt(component) - 1);
         }
         return mask;
     }
@@ -394,7 +394,7 @@ pub const World = struct {
             }
         }
         var mask = try std.DynamicBitSetUnmanaged.initEmpty(self.allocator, self.registry.count());
-        for (ids) |id| mask.set(@intFromEnum(id) - 1);
+        for (ids) |id| mask.set(@backingInt(id) - 1);
         return self.getOrCreateArchetype(mask);
     }
 
@@ -449,7 +449,7 @@ pub const World = struct {
         if (info != .@"struct") {
             return &.{};
         }
-        const fields = info.@"struct".fields;
+        const fields = info.@"struct";
         const Table = struct {
             const value = blk: {
                 var result: [fields.len]registry_mod.FieldDesc = undefined;
@@ -497,13 +497,13 @@ pub const World = struct {
         var signature: u64 = 0;
         var bits = mask.iterator(.{});
         while (bits.next()) |bit| {
-            signature ^= componentSignature(@enumFromInt(@as(u32, @intCast(bit + 1))));
+            signature ^= componentSignature(@fromBackingInt(@intCast(@as(u32, @intCast(bit + 1)))));
         }
         return signature ^ (@as(u64, @intCast(mask.count())) *% 0x9e3779b97f4a7c15);
     }
 
     fn componentSignature(id: ComponentId) u64 {
-        var value: u64 = @intFromEnum(id);
+        var value: u64 = @backingInt(id);
         value +%= 0x9e3779b97f4a7c15;
         value = (value ^ (value >> 30)) *% 0xbf58476d1ce4e5b9;
         value = (value ^ (value >> 27)) *% 0x94d049bb133111eb;

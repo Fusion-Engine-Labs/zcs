@@ -54,9 +54,7 @@ pub fn build(b: *std.Build) void {
 
     const bench_run = b.addRunArtifact(bench);
     bench_run.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        bench_run.addArgs(args);
-    }
+    bench_run.addPassthruArgs();
     const bench_step = b.step("bench", "Run benchmarks");
     bench_step.dependOn(&bench_run.step);
 }
