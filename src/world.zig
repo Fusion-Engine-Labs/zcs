@@ -295,23 +295,25 @@ pub const World = struct {
 
     pub fn spawnWith(self: *Self, values: anytype) !EntityID {
         const fields = switch (@typeInfo(@TypeOf(values))) {
-            .@"struct" => |info| info.fields,
+            .@"struct" => |info| info,
             else => @compileError("spawnWith expects a tuple or struct of component values"),
         };
         comptime {
-            for (fields, 0..) |field, i| {
-                for (fields[0..i]) |other| {
-                    if (field.type == other.type) {
-                        @compileError("spawnWith contains duplicate component type " ++ @typeName(field.type));
+            for (fields.field_types, 0..) |field, i| {
+                for (fields.field_types[0..i]) |other| {
+                    if (field == other) {
+                        @compileError("spawnWith contains duplicate component type " ++ @typeName(field));
                     }
                 }
             }
         }
-        if (comptime fields.len == 0) return self.spawn();
+        if (comptime fields.field_types.len == 0) {
+            return self.spawn();
+        }
 
-        var ids: [fields.len]ComponentId = undefined;
-        inline for (fields, 0..) |field, i| {
-            ids[i] = self.typeId(field.type);
+        var ids: [fields.field_types.len]ComponentId = undefined;
+        inline for (fields.field_types, 0..) |ty, i| {
+            ids[i] = self.typeId(ty);
         }
         const arch = try self.archetypeForIds(&ids);
 
@@ -320,9 +322,9 @@ pub const World = struct {
         try self.ensureLocationCapacity(id.index);
         const result = try arch.appendEntity(id);
         const chunk = arch.chunks.items[result.chunk_idx];
-        inline for (fields, 0..) |field, i| {
-            if (@sizeOf(field.type) > 0) {
-                const value = @field(values, field.name);
+        inline for (fields.field_names, fields.field_types, 0..) |name, ty, i| {
+            if (@sizeOf(ty) > 0) {
+                const value = @field(values, name);
                 const col = arch.column(ids[i]).?;
                 @memcpy(Archetype.cell(chunk, result.row, col), std.mem.asBytes(&value));
             }
@@ -452,9 +454,9 @@ pub const World = struct {
         const fields = info.@"struct";
         const Table = struct {
             const value = blk: {
-                var result: [fields.len]registry_mod.FieldDesc = undefined;
-                for (fields, 0..) |field, i| {
-                    result[i] = .{ .name = field.name, .type = fieldType(field.type), .offset = @offsetOf(T, field.name) };
+                var result: [fields.field_names.len]registry_mod.FieldDesc = undefined;
+                for (fields.field_names, fields.field_types, 0..) |name, ty, i| {
+                    result[i] = .{ .name = name, .type = fieldType(ty), .offset = @offsetOf(T, name) };
                 }
                 break :blk result;
             };
@@ -497,7 +499,7 @@ pub const World = struct {
         var signature: u64 = 0;
         var bits = mask.iterator(.{});
         while (bits.next()) |bit| {
-            signature ^= componentSignature(@fromBackingInt(@intCast(@as(u32, @intCast(bit + 1)))));
+            signature ^= componentSignature(@fromBackingInt(@as(u32, @intCast(bit + 1))));
         }
         return signature ^ (@as(u64, @intCast(mask.count())) *% 0x9e3779b97f4a7c15);
     }

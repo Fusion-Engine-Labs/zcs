@@ -57,4 +57,9 @@ pub fn build(b: *std.Build) void {
     bench_run.addPassthruArgs();
     const bench_step = b.step("bench", "Run benchmarks");
     bench_step.dependOn(&bench_run.step);
+
+    const check_step = b.step("check", "Compile tests, example, and benchmark");
+    check_step.dependOn(&mod_tests.step);
+    check_step.dependOn(&example.step);
+    check_step.dependOn(&bench.step);
 }
