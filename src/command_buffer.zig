@@ -73,8 +73,10 @@ pub const CommandBuffer = struct {
         const start = self.commands.items.len;
         errdefer self.discardFrom(start);
         const id = try self.spawn();
-        inline for (std.meta.fields(@TypeOf(values))) |field| {
-            try self.addComponent(id, field.type, @field(values, field.name));
+
+        const fields = @typeInfo(@TypeOf(values)).@"struct";
+        inline for (fields.field_names, fields.field_types) |name, ty| {
+            try self.addComponent(id, ty, @field(values, name));
         }
         return id;
     }

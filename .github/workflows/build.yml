@@ -1,31 +1,82 @@
-name: Build
+name: Zig
 
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+    push:
+        branches: [main]
+    pull_request:
+        branches: [main]
+
+permissions:
+    contents: read
+    actions: read
+
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    container: jackpar/zig:0.16.0
+    fmt:
+        runs-on: blacksmith-4vcpu-ubuntu-2404
 
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v6
 
-    - name: Check formatting
-      run: zig fmt --check build.zig src examples
+            - name: Setup Zig
+              uses: mlugg/setup-zig@v2
+              with:
+                  version: 0.17.0
+                  cache-key: fmt
 
-    - name: Test (Debug)
-      run: zig build test --summary all
+            - name: Check formatting
+              run: zig fmt --check .
 
-    - name: Test (ReleaseSafe)
-      run: zig build test --summary all -Doptimize=ReleaseSafe
+    test:
+        runs-on: blacksmith-4vcpu-ubuntu-2404
+        strategy:
+            fail-fast: false
+            matrix:
+                optimize: [Debug, ReleaseSafe, ReleaseFast, ReleaseSmall]
 
-    - name: Test (ReleaseFast)
-      run: zig build test --summary all -Doptimize=ReleaseFast
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v6
 
-    - name: Build example and benchmark
-      run: zig build --summary all
+            - name: Setup Zig
+              uses: mlugg/setup-zig@v2
+              with:
+                  version: 0.17.0
+                  cache-key: test-${{ matrix.optimize }}
+
+            - name: Compile everything (${{ matrix.optimize }})
+              run: zig build check -Doptimize=${{ matrix.optimize }} --summary all
+
+            - name: Test project (${{ matrix.optimize }})
+              run: zig build test -Doptimize=${{ matrix.optimize }} --summary all
+
+    cross-compile:
+        runs-on: blacksmith-4vcpu-ubuntu-2404
+        strategy:
+            fail-fast: false
+            matrix:
+                target:
+                    [
+                        x86_64-windows,
+                        x86_64-macos,
+                        aarch64-macos,
+                        aarch64-linux,
+                        x86_64-linux-musl,
+                    ]
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v6
+
+            - name: Setup Zig
+              uses: mlugg/setup-zig@v2
+              with:
+                  version: 0.17.0
+                  cache-key: cross-${{ matrix.target }}
+
+            - name: Compile for ${{ matrix.target }}
+              run: zig build check -Dtarget=${{ matrix.target }} --summary all

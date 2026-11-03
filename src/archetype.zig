@@ -34,7 +34,7 @@ pub const Archetype = struct {
         var stride: usize = @sizeOf(EntityID);
         var bits = mask.iterator(.{});
         while (bits.next()) |bit| {
-            const id: ComponentId = @enumFromInt(@as(u32, @intCast(bit + 1)));
+            const id: ComponentId = @fromBackingInt(@as(u32, @intCast(bit + 1)));
             const desc = registry.desc(id);
             if (desc.size > 0) {
                 stride += desc.size;
@@ -51,7 +51,7 @@ pub const Archetype = struct {
         var offset: usize = @as(usize, self.capacity) * @sizeOf(EntityID);
         bits = mask.iterator(.{});
         while (bits.next()) |bit| {
-            const id: ComponentId = @enumFromInt(@as(u32, @intCast(bit + 1)));
+            const id: ComponentId = @fromBackingInt(@as(u32, @intCast(bit + 1)));
             try self.change_ids.append(allocator, id);
             const desc = registry.desc(id);
             if (desc.size == 0) {
@@ -92,7 +92,7 @@ pub const Archetype = struct {
     }
 
     pub fn has(self: *const Archetype, id: ComponentId) bool {
-        const bit = @as(usize, @intFromEnum(id) - 1);
+        const bit = @as(usize, @backingInt(id) - 1);
         return bit < self.mask.bit_length and self.mask.isSet(bit);
     }
 
@@ -196,7 +196,7 @@ pub const Archetype = struct {
         var offset = @as(usize, capacity) * @sizeOf(EntityID);
         var bits = self.mask.iterator(.{});
         while (bits.next()) |bit| {
-            const desc = registry.desc(@enumFromInt(@as(u32, @intCast(bit + 1))));
+            const desc = registry.desc(@fromBackingInt(@as(u32, @intCast(bit + 1))));
             if (desc.size == 0) {
                 continue;
             }
